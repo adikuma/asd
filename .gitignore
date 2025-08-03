@@ -1,0 +1,15 @@
+# python
+__pycache__/
+
+# jupyter notebook
+.ipynb_checkpoints
+
+# environments
+.env
+env/
+.venv
+venv/
+
+# misc
+asd.egg-info
+*.txt
