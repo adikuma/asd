@@ -22,4 +22,10 @@ setuptools.setup(
             "asd=asd.cli:run",
         ],
     },
+    license="MIT",
+    classifiers=[
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3",
+        "Operating System :: OS Independent",
+    ],
 )

@@ -33,6 +33,6 @@ This opens ASD’s interactive terminal interface. Enter any Git task in plain E
 
 ## Roadmap
 
-ASD is an early project with plenty of room for improvement. I would love to have people test it, report issues, and suggest features so I can refine and expand its capabilities.
+ASD is an early project **with plenty of room for improvement**. I would love to have people test it, report issues, and suggest features so I can refine and expand its capabilities.
 
 Contributions and feedback are welcome. Please open an issue or submit a pull request.
