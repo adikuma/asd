@@ -17,13 +17,21 @@ I like building things and always wanted something focused on Git. With some fre
 
 ## Getting Started
 
-Install directly from the GitHub repository:
+##### Installation
+
+From PyPI:
+
+```bash
+pip install git-asd
+```
+
+Or directly from GitHub:
 
 ```bash
 pip install git+https://github.com/adikuma/asd.git
 ```
 
-Launch the CLI:
+##### Launch
 
 ```bash
 asd

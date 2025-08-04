@@ -13,3 +13,8 @@ venv/
 # misc
 asd.egg-info
 *.txt
+
+# build
+dist/
+build/
+*.egg-info/
