@@ -1,6 +1,7 @@
 import os
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from .models import Intent
@@ -43,10 +44,15 @@ focus on git operations only. if the user asks about non-git tasks, set primary_
 
 
 # capturing user's intent using an LLM and system prompt with structured outputs
-def get_llm() -> ChatOpenAI:
-    api_key = os.environ["OPENAI_API_KEY"]
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    return ChatOpenAI(model=model, api_key=api_key)
+def get_llm():
+    if os.getenv("GOOGLE_API_KEY"):
+        return ChatGoogleGenerativeAI(
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+            api_key=os.getenv("GOOGLE_API_KEY"),
+        )
+    return ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL", "o4-mini"), api_key=os.getenv("OPENAI_API_KEY")
+    )
 
 
 def parse_intent(user_input: str) -> Intent:

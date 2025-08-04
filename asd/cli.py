@@ -7,7 +7,13 @@ from rich.console import Console
 from .core.graph import create_git_assistant
 from .core.models import State
 from .ui.display import display_results, show_help, welcome_screen
-from .ui.prompts import THEME, confirm_exit, get_user_input, select_model
+from .ui.prompts import (
+    THEME,
+    configure_api_key,
+    confirm_exit,
+    get_user_input,
+    select_model,
+)
 
 app = typer.Typer(add_completion=False)
 console = Console(theme=THEME)
@@ -18,15 +24,10 @@ def run():
     # load environment variables
     load_dotenv()
 
+    configure_api_key()
     # check for required api key
-    if not os.getenv("OPENAI_API_KEY"):
-        typer.secho(
-            "error: OPENAI_API_KEY environment variable not set.", fg=typer.colors.RED
-        )
-        typer.secho(
-            "get your api key from: https://platform.openai.com/api-keys",
-            fg=typer.colors.BLUE,
-        )
+    if not (os.getenv("OPENAI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+        typer.secho("error: no API key configured.", fg=typer.colors.RED)
         raise typer.Exit(1)
 
     # show welcome screen

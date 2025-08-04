@@ -2,7 +2,7 @@
 
 ASD is a natural language Git assistant for the terminal. It translates plain English instructions into Git commands, helping you manage branches, histories, and merges safely and efficiently.
 
-![Example Usage](images/example.png)
+![Example Usage](images/example.png "Example")
 
 ## Why ASD?
 

@@ -1,6 +1,7 @@
 import os
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from .git_tools import get_git_diff_analysis
@@ -98,10 +99,15 @@ git_concepts_taught: ["commit history", "reset modes", "staging area"]
 
 
 # using an llm to generate an execution plan with structured outputs
-def get_llm() -> ChatOpenAI:
-    api_key = os.environ["OPENAI_API_KEY"]
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    return ChatOpenAI(model=model, api_key=api_key)
+def get_llm():
+    if os.getenv("GOOGLE_API_KEY"):
+        return ChatGoogleGenerativeAI(
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+            api_key=os.getenv("GOOGLE_API_KEY"),
+        )
+    return ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL", "o4-mini"), api_key=os.getenv("OPENAI_API_KEY")
+    )
 
 
 def generate_execution_plan(state: State) -> ExecutionPlan:

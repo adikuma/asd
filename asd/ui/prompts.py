@@ -1,6 +1,5 @@
 import os
 
-from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -9,6 +8,19 @@ from .display import display_execution_plan, display_git_status
 from .themes import SYMBOLS, THEME
 
 console = Console(theme=THEME)
+
+
+# function to configure the api key set in user's environment
+def configure_api_key():
+    if not os.getenv("OPENAI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
+        opts = "[accent]1.[/] OpenAI\n[accent]2.[/] Google AI"
+        console.print(Panel(opts, title="[header]No API Key Found[/header]", width=40))
+        provider = Prompt.ask("Select provider", choices=["1", "2"], console=console)
+        key = Prompt.ask("Enter API key", console=console)  # no password=True
+        if provider == "1":
+            os.environ["OPENAI_API_KEY"] = key
+        else:
+            os.environ["GOOGLE_API_KEY"] = key
 
 
 def get_user_input() -> str:
@@ -25,35 +37,55 @@ def confirm_exit() -> bool:
     )
 
 
+# if user has multiple providers, prompt to select one
+# detect the provider set in the environment and select the defaults
 def select_model():
-    # prompt to select openai model
-    models = ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4.1-mini", "o4-mini"]
-    current = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-    opts = "\n".join(
-        f"[accent]{i}.[/accent] {model}{' [success]← current[/]' if model == current else ''}"
-        for i, model in enumerate(models, 1)
-    )
-
-    console.print(
-        Panel(
-            opts,
-            title="[header]model selection[/header]",
-            box=box.ROUNDED,
-            width=40,
-            style="info",
+    providers = []
+    if os.getenv("OPENAI_API_KEY"):
+        providers.append(("openai", "OpenAI"))
+    if os.getenv("GOOGLE_API_KEY"):
+        providers.append(("google", "Google"))
+    if len(providers) > 1:
+        menu = "\n".join(
+            f"[accent]{i}.[/] {name}" for i, (k, name) in enumerate(providers, 1)
         )
+        console.print(Panel(menu, title="[header]Select Provider[/header]", width=40))
+        p = Prompt.ask(
+            "Choice",
+            choices=[str(i) for i in range(1, len(providers) + 1)],
+            console=console,
+        )
+        provider = providers[int(p) - 1][0]
+    else:
+        provider = providers[0][0]
+    if provider == "openai":
+        models = ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4.1-mini", "o4-mini"]
+        default = os.getenv("OPENAI_MODEL", "o4-mini")
+    else:
+        models = [
+            "gemini-2.0-flash",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+        ]
+        default = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
+    menu = "\n".join(
+        f"[accent]{i}.[/] {m}{' [success]← current[/]' if m == default else ''}"
+        for i, m in enumerate(models, 1)
     )
-
-    choice = Prompt.ask(
-        f"[prompt]{SYMBOLS['prompt']} select model [1-{len(models)}]:[/prompt]",
+    console.print(
+        Panel(menu, title=f"[header]{provider.title()} Models[/header]", width=50)
+    )
+    c = Prompt.ask(
+        "Select model",
         choices=[str(i) for i in range(1, len(models) + 1)],
         console=console,
     )
-
-    selected_model = models[int(choice) - 1]
-    os.environ["OPENAI_MODEL"] = selected_model
-    console.print(f"[success]model set to {selected_model}[/success]\n")
+    sel = models[int(c) - 1]
+    if provider == "openai":
+        os.environ["OPENAI_MODEL"] = sel
+    else:
+        os.environ["GOOGLE_MODEL"] = sel
+    console.print(f"[success]model set to {sel}[/success]\n")
 
 
 # function to modify the command

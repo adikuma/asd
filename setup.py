@@ -11,6 +11,7 @@ setuptools.setup(
     install_requires=[
         "langchain-core",
         "langchain-openai",
+        "langchain-google-genai",
         "langgraph",
         "typer[all]",
         "rich",
