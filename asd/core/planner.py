@@ -5,7 +5,12 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from .git_tools import get_git_diff_analysis
-from .models import ExecutionPlan, State
+from .models import (
+    ExecutionPlan,
+    GitStatus,
+    State,
+    StepResult,
+)
 
 PLANNING_PROMPT = """you are an expert git instructor focused on safety and education. create a step-by-step execution plan that:
 
@@ -98,6 +103,67 @@ git_concepts_taught: ["commit history", "reset modes", "staging area"]
 **output the complete ExecutionPlan as json.**"""
 
 
+RECOVERY_PLANNING_PROMPT = """you are an expert git instructor creating a recovery plan after a command failed.
+
+**FAILURE CONTEXT:**
+- original user intent: {original_intent}
+- completed steps successfully: {completed_steps}
+- failed step: {failed_command}
+- failure reason: {error_message}  
+- current git repository state: {current_git_status}
+
+**RECOVERY PLANNING PRINCIPLES:**
+
+**analyze the failure:**
+- why did this specific command fail?
+- what does the error tell us about the repository state?
+- how has the situation changed since the original plan?
+
+**adapt strategy:**
+- the original plan assumed a certain state - what's different now?
+- what's the most direct path to achieve the user's original intent?
+- should we change approach entirely or just fix the immediate issue?
+
+**educational recovery:**
+- explain why this failure happened and how to prevent it
+- teach the user what the error means in git terms
+- show how to recognize and handle this type of failure in the future
+
+**safety in recovery:**
+- ensure the new plan won't cause additional failures
+- check prerequisites before each new step
+- provide recovery options for the new plan too
+
+**example recovery scenarios:**
+
+**scenario 1: commit failed - nothing staged**
+original plan: [add ., commit, push]
+failure: "nothing to commit, working tree clean" 
+analysis: files were already committed, original plan was outdated
+new plan: [status (verify clean), fetch, push] - adapt to reality
+
+**scenario 2: push failed - behind remote**  
+original plan: [commit, push]
+failure: "updates were rejected"
+analysis: someone else pushed, need to sync first
+new plan: [pull --rebase, resolve any conflicts, push] - handle collaboration
+
+**scenario 3: merge failed - conflicts**
+original plan: [checkout main, merge feature]  
+failure: "automatic merge failed, fix conflicts"
+analysis: conflicting changes need manual resolution
+new plan: [show conflicts, guide resolution, add resolved files, commit merge] - step-by-step conflict resolution
+
+**create a new ExecutionPlan that:**
+1. acknowledges what failed and why
+2. adapts to current repository state (not original assumptions)
+3. provides educational context about the failure and recovery
+4. ensures each step has proper prerequisites to avoid cascading failures
+5. teaches patterns for handling similar failures in the future
+
+**output the complete ExecutionPlan as json.**"""
+
+
 # using an llm to generate an execution plan with structured outputs
 def get_llm():
     if os.getenv("GOOGLE_API_KEY"):
@@ -156,3 +222,39 @@ def generate_execution_plan(state: State) -> ExecutionPlan:
     plan.total_steps = len(plan.steps)
 
     return plan
+
+
+# recovery planning function
+def generate_recovery_plan(
+    state: State,
+    failed_step: StepResult,
+    current_git_status: GitStatus,
+    completed_steps: list,
+) -> ExecutionPlan:
+    llm = get_llm()
+    recovery_planner = llm.with_structured_output(ExecutionPlan)
+
+    # prepare recovery context using the state, failed step, current git status, and completed steps
+    recovery_context = {
+        "original_intent": state.intent.dict() if state.intent else state.input,
+        "completed_steps": [step.dict() for step in completed_steps],
+        "failed_command": failed_step.command,
+        "error_message": failed_step.error,
+        "current_git_status": current_git_status.dict(),
+        "original_plan_summary": state.plan.summary if state.plan else "unknown",
+        "staged_changes": get_git_diff_analysis() or "no staged changes",
+    }
+
+    # prepare messages for recovery planning
+    messages = [
+        SystemMessage(content=RECOVERY_PLANNING_PROMPT.format(**recovery_context)),
+        HumanMessage(
+            content=f"create recovery plan for this failure: {recovery_context}"
+        ),
+    ]
+
+    # generate recovery plan
+    recovery_plan = recovery_planner.invoke(messages)
+    recovery_plan.total_steps = len(recovery_plan.steps)
+
+    return recovery_plan

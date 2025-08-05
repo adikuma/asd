@@ -92,6 +92,26 @@ def display_execution_plan(plan):
     console.print(panel)
 
 
+# recovery plan comparison display
+def display_recovery_comparison(original_plan, recovery_plan, failure_reason):
+    # failure analysis
+    console.print(f"\n[failure] failure analysis: {failure_reason}[/failure]")
+
+    # strategy comparison
+    console.print("\n[accent] plan comparison:[/accent]")
+    console.print(f"[warning]original: {original_plan.summary}[/warning]")
+    console.print(f"[success]recovery: {recovery_plan.summary}[/success]")
+
+    # why strategy changed
+    console.print(
+        f"\n[educational] why changed: {recovery_plan.educational_summary}[/educational]"
+    )
+
+    # new recovery plan
+    console.print("\n[accent] recovery plan:[/accent]")
+    display_execution_plan(recovery_plan)
+
+
 def display_results(state):
     # display results panel and lessons learned
     if state.operation_success:

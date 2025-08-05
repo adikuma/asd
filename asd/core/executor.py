@@ -1,14 +1,19 @@
 from rich.prompt import Confirm
 
-from ..ui.display import console
+from ..ui.display import (
+    console,
+    display_recovery_comparison,
+)
 from ..ui.prompts import confirm_step_execution
 from .git_tools import (
     check_git_prerequisites,
     generate_commit_message,
     get_git_diff_analysis,
+    get_git_status,
     run_git_command,
 )
 from .models import State, StepResult
+from .planner import generate_recovery_plan
 
 
 def execute_plan(state: State) -> State:
@@ -119,11 +124,38 @@ def execute_plan(state: State) -> State:
 
         state.step_results.append(step_result)
 
-        # if command failed, ask if user wants to continue
+        # if command failed, trigger replanning instead of asking to continue
         if not result["success"]:
-            if not Confirm.ask(
-                "[prompt]> continue with remaining steps?[/prompt]", console=console
+            console.print(
+                "[loading] analyzing failure and replanning workflow...[/loading]"
+            )
+            # get fresh git status after failure
+            fresh_git_status = get_git_status()
+            # create  the recovery context
+            completed_successful_steps = [r for r in state.step_results if r.success]
+            recovery_plan = generate_recovery_plan(
+                state, step_result, fresh_git_status, completed_successful_steps
+            )
+
+            # display plan comparison
+            display_recovery_comparison(state.plan, recovery_plan, step_result.error)
+            # ask user if they want to proceed with recovery plan
+            if Confirm.ask(
+                "[prompt] proceed with recovery plan?[/prompt]", console=console
             ):
+                # update state with recovery plan and restart execution
+                console.print("[info]📋 switching to recovery plan...[/info]\n")
+                state.plan = recovery_plan
+                state.recovery_needed = True
+                state.lessons_learned.append(
+                    f"learned to recover from: {step_result.error}"
+                )
+
+                # recursive call to execute the recovery plan
+                return execute_plan(state)
+            else:
+                console.print("[warning]⏹ execution stopped by user[/warning]")
+                all_success = False
                 break
 
     state.operation_complete = True
@@ -135,53 +167,3 @@ def execute_plan(state: State) -> State:
         state.final_message = "execution completed with some failures"
 
     return state
-
-
-# manually checking for recoverable errors
-# TODO: could be made more robust and automated with an LLM
-def _is_recoverable_error(error_msg: str, command: str) -> bool:
-    recoverable_patterns = [
-        "nothing to commit",
-        "already up to date",
-        "no changes added to commit",
-        "pathspec .* did not match any files",
-    ]
-
-    return any(pattern in error_msg.lower() for pattern in recoverable_patterns)
-
-
-# manually getting the recovery message
-# TODO: could be made more robust and automated with an LLM
-def _get_recovery_message(error_msg: str, command: str, step) -> str:
-    error_lower = error_msg.lower()
-
-    if "nothing to commit" in error_lower:
-        return (
-            "no changes to commit. this is normal if you've already committed everything. "
-            "use 'git status' to see what's happening."
-        )
-
-    if "already up to date" in error_lower:
-        return (
-            "your branch is already current with the remote. this means the operation "
-            "was unnecessary but harmless."
-        )
-
-    if "no changes added to commit" in error_lower:
-        return (
-            "you need to stage files first with 'git add <file>' before committing. "
-            "this is git's two-step commit process: stage, then commit."
-        )
-
-    if "pathspec" in error_lower and "did not match" in error_lower:
-        return (
-            "the file or path specified doesn't exist. check your spelling and "
-            "use 'git status' to see available files."
-        )
-
-    if step.recovery_options:
-        return (
-            f"operation failed. suggested recovery: {'; '.join(step.recovery_options)}"
-        )
-
-    return f"operation failed: {error_msg}"
