@@ -12,7 +12,6 @@ venv/
 
 # misc
 asd.egg-info
-*.txt
 
 # build
 dist/
