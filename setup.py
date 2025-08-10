@@ -15,6 +15,7 @@ setuptools.setup(
         "langgraph",
         "typer[all]",
         "rich",
+        "rich-gradient",
         "python-dotenv",
         "IPython",
     ],

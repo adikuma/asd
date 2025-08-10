@@ -23,6 +23,7 @@ THEME = Theme(
         "caution": "yellow3",
         "risky": "orange1",
         "dangerous": "red1",
+        "caption": "grey50",
     }
 )
 

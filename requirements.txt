@@ -4,5 +4,7 @@ langchain-google-genai
 langgraph
 typer[all]
 rich
+rich-gradient
 python-dotenv
 IPython
+questionary

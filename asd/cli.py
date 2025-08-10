@@ -8,12 +8,13 @@ from .core.graph import create_git_assistant
 from .core.models import State
 from .ui.display import display_results, show_help, welcome_screen
 from .ui.prompts import (
-    THEME,
     configure_api_key,
     confirm_exit,
     get_user_input,
     select_model,
 )
+
+from .ui.themes import THEME
 
 app = typer.Typer(add_completion=False)
 console = Console(theme=THEME)

@@ -1,6 +1,7 @@
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich_gradient import Gradient
 
 from .themes import THEME
 
@@ -8,28 +9,34 @@ console = Console(theme=THEME, width=80)
 
 
 def welcome_screen():
-    # display welcome screen and banner
-    logo = r"""
-     █████╗ ███████╗██████╗ 
-    ██╔══██╗██╔════╝██╔══██╗
-    ███████║███████╗██║  ██║
-    ██╔══██║╚════██║██║  ██║
-    ██║  ██║███████║██████╔╝
-    ╚═╝  ╚═╝╚══════╝╚═════╝ 
+    raw_logo = r"""
+  █████╗ ███████╗██████╗ 
+  ██╔══██╗██╔════╝██╔══██╗
+  ███████║███████╗██║  ██║
+  ██╔══██║╚════██║██║  ██║
+  ██║  ██║███████║██████╔╝
+  ╚═╝  ╚═╝╚══════╝╚═════╝ 
     """
     console.clear()
-    console.print(
-        Panel(logo, box=box.MINIMAL, style="header", width=100),
-        justify="center",
-    )
-    console.print(
-        "[accent]a simpler way to understand git[/accent]\n", justify="center"
-    )
-    console.print(
-        "press [educational]h[/educational] for help, [educational]m[/educational] to select model, [educational]q[/educational] to quit",
-        justify="center",
-    )
-    console.print()  # print a new line
+
+    # strip/dedent & indent
+    logo = "\n".join("  " + line for line in raw_logo.strip("\n").splitlines())
+
+    # apply gradient (orange1 → yellow1) to the whole block
+    gradient_logo = Gradient(logo, colors=["orange1", "yellow1"])
+
+    console.print(gradient_logo, justify="left")
+
+    console.print("[caption]Tips for getting started:[/caption]")
+    tips = [
+        "[caption]press [educational]h[/educational] for help[/caption]",
+        "[caption]press [educational]m[/educational] to select model[/caption]",
+        "[caption]press [educational]q[/educational] to quit[/caption]",
+    ]
+    for i, tip in enumerate(tips, 1):
+        console.print(f"[caption]{i}.[/] {tip}")
+
+    console.print()  # blank line
 
 
 def display_git_status(status):

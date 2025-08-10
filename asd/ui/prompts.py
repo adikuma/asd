@@ -6,21 +6,51 @@ from rich.prompt import Confirm, Prompt
 
 from .display import display_execution_plan, display_git_status
 from .themes import SYMBOLS, THEME
+import questionary
 
 console = Console(theme=THEME)
 
 
 # function to configure the api key set in user's environment
-def configure_api_key():
-    if not os.getenv("OPENAI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
-        opts = "[accent]1.[/] OpenAI\n[accent]2.[/] Google AI"
-        console.print(Panel(opts, title="[header]No API Key Found[/header]", width=40))
-        provider = Prompt.ask("Select provider", choices=["1", "2"], console=console)
-        key = Prompt.ask("Enter API key", console=console)  # no password=True
-        if provider == "1":
-            os.environ["OPENAI_API_KEY"] = key
-        else:
-            os.environ["GOOGLE_API_KEY"] = key
+def configure_api_key() -> bool:
+    if os.getenv("OPENAI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+        return True  # already configured
+
+    console.print(Panel("[info]no api key found[/info]", title="[header]Setup[/header]", width=40))
+
+    provider = questionary.select(
+        "Select provider",
+        choices=["OpenAI", "Google"],
+    ).ask()
+    if not provider:  # user pressed ESC/Ctrl+C
+        console.print("[warning]setup cancelled[/warning]")
+        return False
+
+    key = questionary.password("Enter API key").ask()
+    if not key or not key.strip():
+        console.print("[failure]no key entered[/failure]")
+        return False
+
+    key = key.strip()
+    if provider == "OpenAI":
+        os.environ["OPENAI_API_KEY"] = key
+        os.environ["PROVIDER"] = "openai"
+    else:
+        os.environ["GOOGLE_API_KEY"] = key
+        os.environ["PROVIDER"] = "google"
+
+    console.print(f"[success]api key saved for {provider.lower()}[/success]")
+    return True
+
+    # if not os.getenv("OPENAI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
+    #     opts = "[accent]1.[/] OpenAI\n[accent]2.[/] Google AI"
+    #     console.print(Panel(opts, title="[header]No API Key Found[/header]", width=40))
+    #     provider = Prompt.ask("Select provider", choices=["1", "2"], console=console)
+    #     key = Prompt.ask("Enter API key", console=console, password=True)  # added password=True
+    #     if provider == "1":
+    #         os.environ["OPENAI_API_KEY"] = key
+    #     else:
+    #         os.environ["GOOGLE_API_KEY"] = key
 
 
 def get_user_input() -> str:
@@ -37,7 +67,6 @@ def confirm_exit() -> bool:
     )
 
 
-# if user has multiple providers, prompt to select one
 # detect the provider set in the environment and select the defaults
 def select_model():
     providers = []
@@ -45,6 +74,8 @@ def select_model():
         providers.append(("openai", "OpenAI"))
     if os.getenv("GOOGLE_API_KEY"):
         providers.append(("google", "Google"))
+        
+    # if user has multiple providers, prompt to select one
     if len(providers) > 1:
         menu = "\n".join(
             f"[accent]{i}.[/] {name}" for i, (k, name) in enumerate(providers, 1)
@@ -58,35 +89,46 @@ def select_model():
         provider = providers[int(p) - 1][0]
     else:
         provider = providers[0][0]
+        
+    # if the provider is openai, set the models and default
     if provider == "openai":
         models = ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4.1-mini", "o4-mini"]
         default = os.getenv("OPENAI_MODEL", "o4-mini")
     else:
+        # if the provider is google, set the models and default
         models = [
             "gemini-2.0-flash",
             "gemini-2.5-flash",
             "gemini-2.5-pro",
         ]
         default = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
-    menu = "\n".join(
-        f"[accent]{i}.[/] {m}{' [success]← current[/]' if m == default else ''}"
-        for i, m in enumerate(models, 1)
-    )
-    console.print(
-        Panel(menu, title=f"[header]{provider.title()} Models[/header]", width=50)
-    )
-    c = Prompt.ask(
+        
+    # now get the user's choice
+    display_choices = [
+        f"{m} {'← current' if m == default else ''}".strip()
+        for m in models
+    ]
+    
+    # use questionary to get the user's choice
+    selected_display = questionary.select(
         "Select model",
-        choices=[str(i) for i in range(1, len(models) + 1)],
-        console=console,
-    )
-    sel = models[int(c) - 1]
-    if provider == "openai":
-        os.environ["OPENAI_MODEL"] = sel
-    else:
-        os.environ["GOOGLE_MODEL"] = sel
-    console.print(f"[success]model set to {sel}[/success]\n")
+        choices=display_choices,
+        default=next(c for c in display_choices if "← current" in c),
+    ).ask()
+    
+    # get the model from the user's choice
+    sel_model = selected_display.split(" ")[0]
 
+    if provider == "openai":
+        os.environ["OPENAI_MODEL"] = sel_model
+    else:
+        os.environ["GOOGLE_MODEL"] = sel_model
+    console.print(f"[success]model set to {sel_model}[/success]\n")
+    
+    # if no providers, print error and return (added fallback)
+    if not providers:
+        console.print("[failure]no provider configured. set an API key first.[/failure]")
+        return
 
 # function to modify the command
 def modify_command(current_command: str) -> str:
