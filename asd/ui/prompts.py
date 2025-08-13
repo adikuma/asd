@@ -1,32 +1,52 @@
 import os
 
+import questionary
+from questionary import Style as QStyle  # custom style for questionary
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
 from .display import display_execution_plan, display_git_status
 from .themes import SYMBOLS, THEME
-import questionary
 
 console = Console(theme=THEME)
 
+# unified dropdown style to match the ui palette
+# keys are prompt_toolkit style tokens used by questionary
+QSTYLE = QStyle(
+    [
+        ("qmark", "fg:#8fb4d8 bold"),
+        ("question", "fg:#8fb4d8 bold"),
+        ("answer", "fg:#8fb4d8"),
+        ("pointer", "fg:#8fb4d8 bold"),
+        ("highlighted", "fg:#0f1419 bg:#8fb4d8"),
+        ("selected", "fg:#0f1419 bg:#8fb4d8"),
+        ("separator", "fg:#5a6472"),
+        ("instruction", "fg:#5a6472"),
+        ("text", "fg:#e6edf3"),
+        ("disabled", "fg:#5a6472 italic"),
+    ]
+)
 
-# function to configure the api key set in user's environment
+
 def configure_api_key() -> bool:
     if os.getenv("OPENAI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
-        return True  # already configured
+        return True
 
-    console.print(Panel("[info]no api key found[/info]", title="[header]Setup[/header]", width=40))
+    console.print(
+        Panel("[info]no api key found[/info]", title="[header]Setup[/header]", width=40)
+    )
 
     provider = questionary.select(
         "Select provider",
         choices=["OpenAI", "Google"],
+        style=QSTYLE,
     ).ask()
-    if not provider:  # user pressed ESC/Ctrl+C
+    if not provider:
         console.print("[warning]setup cancelled[/warning]")
         return False
 
-    key = questionary.password("Enter API key").ask()
+    key = questionary.password("Enter API key", style=QSTYLE).ask()
     if not key or not key.strip():
         console.print("[failure]no key entered[/failure]")
         return False
@@ -42,40 +62,32 @@ def configure_api_key() -> bool:
     console.print(f"[success]api key saved for {provider.lower()}[/success]")
     return True
 
-    # if not os.getenv("OPENAI_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
-    #     opts = "[accent]1.[/] OpenAI\n[accent]2.[/] Google AI"
-    #     console.print(Panel(opts, title="[header]No API Key Found[/header]", width=40))
-    #     provider = Prompt.ask("Select provider", choices=["1", "2"], console=console)
-    #     key = Prompt.ask("Enter API key", console=console, password=True)  # added password=True
-    #     if provider == "1":
-    #         os.environ["OPENAI_API_KEY"] = key
-    #     else:
-    #         os.environ["GOOGLE_API_KEY"] = key
-
 
 def get_user_input() -> str:
-    # prompt for git task or question
     return Prompt.ask(
         f"[input]{SYMBOLS['prompt']} git task or question?[/input]", console=console
     ).strip()
 
 
 def confirm_exit() -> bool:
-    # prompt to confirm exit
     return Confirm.ask(
         f"[prompt]{SYMBOLS['prompt']} quit git assistant?[/prompt]", console=console
     )
 
 
-# detect the provider set in the environment and select the defaults
 def select_model():
     providers = []
     if os.getenv("OPENAI_API_KEY"):
         providers.append(("openai", "OpenAI"))
     if os.getenv("GOOGLE_API_KEY"):
         providers.append(("google", "Google"))
-        
-    # if user has multiple providers, prompt to select one
+
+    if not providers:
+        console.print(
+            "[failure]no provider configured. set an api key first.[/failure]"
+        )
+        return
+
     if len(providers) > 1:
         menu = "\n".join(
             f"[accent]{i}.[/] {name}" for i, (k, name) in enumerate(providers, 1)
@@ -89,48 +101,34 @@ def select_model():
         provider = providers[int(p) - 1][0]
     else:
         provider = providers[0][0]
-        
-    # if the provider is openai, set the models and default
+
     if provider == "openai":
         models = ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4.1-mini", "o4-mini"]
-        default = os.getenv("OPENAI_MODEL", "o4-mini")
+        current = os.getenv("OPENAI_MODEL", "o4-mini")
     else:
-        # if the provider is google, set the models and default
-        models = [
-            "gemini-2.0-flash",
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-        ]
-        default = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
-        
-    # now get the user's choice
+        models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"]
+        current = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
+
     display_choices = [
-        f"{m} {'← current' if m == default else ''}".strip()
-        for m in models
+        f"{m} {'← current' if m == current else ''}".strip() for m in models
     ]
-    
-    # use questionary to get the user's choice
+
     selected_display = questionary.select(
         "Select model",
         choices=display_choices,
         default=next(c for c in display_choices if "← current" in c),
+        style=QSTYLE,
     ).ask()
-    
-    # get the model from the user's choice
-    sel_model = selected_display.split(" ")[0]
 
+    sel = selected_display.split(" ")[0]
     if provider == "openai":
-        os.environ["OPENAI_MODEL"] = sel_model
+        os.environ["OPENAI_MODEL"] = sel
     else:
-        os.environ["GOOGLE_MODEL"] = sel_model
-    console.print(f"[success]model set to {sel_model}[/success]\n")
-    
-    # if no providers, print error and return (added fallback)
-    if not providers:
-        console.print("[failure]no provider configured. set an API key first.[/failure]")
-        return
+        os.environ["GOOGLE_MODEL"] = sel
 
-# function to modify the command
+    console.print(f"» model set to {sel}\n")
+
+
 def modify_command(current_command: str) -> str:
     console.print(f"[info]current: {current_command}[/info]")
     new_command = Prompt.ask(
@@ -155,9 +153,12 @@ def confirm_step_execution(
 
     while True:
         choice = Prompt.ask(
-            f"[prompt]{SYMBOLS['prompt']} execute this command? [y/n/modify][/prompt]",
+            f"[prompt]{SYMBOLS['prompt']} execute this command?[/prompt] [choice][y/n/modify][/choice]",
             choices=["y", "n", "modify"],
             console=console,
+            default="y",
+            show_choices=True,
+            show_default=False,
         ).lower()
 
         if choice in ["y", "yes"]:
@@ -174,21 +175,21 @@ def confirm_plan(state) -> bool:
     console.print()
     display_git_status(state.git_status)
     display_execution_plan(state.plan)
-    safety_level = state.plan.overall_safety.lower()
+    lvl = state.plan.overall_safety.lower()
 
-    if safety_level == "dangerous":
-        prompt_msg = f"[failure]{SYMBOLS['prompt']} this operation is dangerous! proceed anyway?[/failure]"
-    elif safety_level == "risky":
-        prompt_msg = f"[destructive]{SYMBOLS['prompt']} this operation is risky. continue?[/destructive]"
-    elif safety_level == "caution":
-        prompt_msg = f"[warning]{SYMBOLS['prompt']} proceed with caution?[/warning]"
+    if lvl == "dangerous":
+        msg = f"[failure]{SYMBOLS['prompt']} this operation is dangerous! proceed anyway?[/failure]"
+    elif lvl == "risky":
+        msg = f"[destructive]{SYMBOLS['prompt']} this operation is risky. continue?[/destructive]"
+    elif lvl == "caution":
+        msg = f"[warning]{SYMBOLS['prompt']} proceed with caution?[/warning]"
     else:
-        prompt_msg = f"[prompt]{SYMBOLS['prompt']} execute this plan?[/prompt]"
+        msg = f"[prompt]{SYMBOLS['prompt']} execute this plan?[/prompt]"
 
-    if safety_level in ["dangerous", "risky"] and state.plan.warnings:
+    if lvl in ["dangerous", "risky"] and state.plan.warnings:
         console.print()
         console.print(
             "[warning]> tip: you can type 'n' to see safer alternatives[/warning]"
         )
 
-    return Confirm.ask(prompt_msg, console=console)
+    return Confirm.ask(msg, console=console)

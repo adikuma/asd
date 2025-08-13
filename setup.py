@@ -16,6 +16,7 @@ setuptools.setup(
         "typer[all]",
         "rich",
         "rich-gradient",
+        "ruff",
         "python-dotenv",
         "IPython",
     ],
