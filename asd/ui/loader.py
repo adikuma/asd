@@ -10,9 +10,11 @@ from .display import console as _loader_console
 
 _current_live: Optional[Live] = None
 
+
 def _render_panel(message: str):
     row = Columns([Spinner("dots"), Align.left(message)], expand=True, equal=False)
     return Panel(row, border_style="accent", style="on #0b1116", padding=(0, 1))
+
 
 def start_loader(message: str):
     global _current_live
@@ -24,6 +26,7 @@ def start_loader(message: str):
         transient=True,  # disappears on stop()
     )
     _current_live.start()
+
 
 def stop_loader():
     global _current_live

@@ -165,6 +165,8 @@ def display_results(state):
         if result.success and result.output:
             out = "  " + result.output.replace("\n", "\n  ")
             lines.append(f"  [info]{out}[/info]")
+            # empty line
+            lines.append("")
         elif not result.success and result.error:
             err = "  " + result.error.replace("\n", "\n  ")
             lines.append(f"  [failure]{err}[/failure]")
@@ -173,7 +175,9 @@ def display_results(state):
         lines.append("")
         lines.append("[accent]learned:[/accent]")
         for lesson in list(set(state.lessons_learned))[:3]:
-            lines.append(f"[info]> {lesson}[/info]")
+            lines.append(f"[note]> {lesson}[/note]")
+            # empty line
+            lines.append("")
 
     panel_style = f"on {RULE_ERR_BG}" if variant == "error" else f"on {STATUS_BG}"
     console.print(

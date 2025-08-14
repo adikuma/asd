@@ -56,9 +56,7 @@ def run():
         if not user_input.strip():
             continue
 
-        start_loader(
-            "analyzing git context and planning safe approach"
-        )
+        start_loader("analyzing git context and planning safe approach")
 
         state = State(input=user_input)
         config = {"configurable": {"thread_id": thread_id}}

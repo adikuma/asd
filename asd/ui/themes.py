@@ -27,6 +27,7 @@ THEME = Theme(
         "concept": "#3b5b76",
         # questionary
         "choice": "#d7ba7d",
+        "note": "#ff77ff",
     }
 )
 
