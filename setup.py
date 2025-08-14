@@ -19,6 +19,7 @@ setuptools.setup(
         "ruff",
         "python-dotenv",
         "IPython",
+        "questionary",
     ],
     entry_points={
         "console_scripts": [
