@@ -2,11 +2,12 @@
 
 ASD is a natural language Git assistant for the terminal. It translates plain English instructions into Git commands, helping you manage branches, histories, and merges safely and efficiently.
 
-![Example Usage](images/example.png "Example")
+![ASD in action](images/example.png "Example Usage")
 
 ## Why ASD?
 
-I like building things and always wanted something focused on Git. With some free time, I built ASD to explore how natural language can simplify complex Git workflows.
+- I struggled with Git’s commands and conflicts.
+- I wanted a simple, transparent tool—no magic—just clear steps.
 
 ## Features
 
@@ -38,6 +39,26 @@ asd
 ```
 
 This opens ASD’s interactive terminal interface. Enter any Git task in plain English.
+
+## Workflow
+
+Here’s a quick look at the five-step process inside ASD:
+
+```mermaid
+flowchart LR
+    Start([Start]) --> Analyze[Analyze Git Context]
+    Analyze --> Intent[Parse User Intent]
+    Intent --> Plan[Generate Execution Plan]
+    Plan --> Review[Review Plan & Status]
+    Review --> Execute[Execute Commands]
+    Execute --> End([End])
+```
+
+1. **Analyze Git Context**: Examine `git status` to capture your repository’s state.
+2. **Parse User Intent**: Turn your English request into a structured plan.
+3. **Generate Execution Plan**:Create a safe list of Git commands.
+4. **Review Plan & Status**: Inspect the plan and current status.
+5. **Execute Commands**: Run each step with your approval and mini-lessons.
 
 ## Roadmap
 

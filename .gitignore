@@ -17,3 +17,6 @@ asd.egg-info
 dist/
 build/
 *.egg-info/
+
+# ruff
+.ruff_cache/
