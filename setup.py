@@ -2,7 +2,7 @@ import setuptools
 
 setuptools.setup(
     name="git-asd",
-    version="1.1.0",
+    version="1.1.1",
     author="Aditya Kumar",
     description="a natural language git assistant for the terminal",
     url="https://github.com/adikuma/asd",
