@@ -1,0 +1,1781 @@
+File structure:
+asd/
+├── cli.py
+├── core/
+│   ├── __init__.py
+│   ├── educator.py
+│   ├── executor.py
+│   ├── git_tools.py
+│   ├── graph.py
+│   ├── intents.py
+│   ├── models.py
+│   ├── planner.py
+│   └── visualization.py
+└── ui/
+    ├── __init__.py
+    ├── display.py
+    ├── loader.py
+    ├── prompts.py
+    └── themes.py
+
+== asd/cli.py ==
+import os
+
+import typer
+from dotenv import load_dotenv
+from rich.console import Console
+
+from .core.graph import create_git_assistant
+from .core.models import State
+from .ui.display import display_results, show_help, welcome_screen
+from .ui.loader import start_loader, stop_loader
+from .ui.prompts import (
+    configure_api_key,
+    confirm_exit,
+    get_user_input,
+    select_model,
+)
+from .ui.themes import THEME
+
+app = typer.Typer(add_completion=False)
+console = Console(theme=THEME)
+
+
+@app.command()
+def run():
+    # env
+    load_dotenv()
+
+    # setup
+    configure_api_key()
+    if not (os.getenv("OPENAI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+        typer.secho("error: no API key configured.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    # ui
+    welcome_screen()
+
+    assistant = create_git_assistant()
+    thread_id = "git_session"
+
+    while True:
+        user_input = get_user_input()
+
+        if user_input.lower() in ("q", "quit", "exit"):
+            if confirm_exit():
+                break
+            continue
+
+        if user_input.lower() in ("h", "help"):
+            show_help()
+            continue
+
+        if user_input.lower() in ("m", "model"):
+            select_model()
+            continue
+
+        if not user_input.strip():
+            continue
+
+        start_loader("analyzing git context and planning safe approach")
+
+        state = State(input=user_input)
+        config = {"configurable": {"thread_id": thread_id}}
+
+        try:
+            result = assistant.invoke(state, config)
+            final_state = State(**result) if isinstance(result, dict) else result
+            stop_loader()
+
+            console.print()
+            display_results(final_state)  # prints two trailing newlines by design
+
+        except KeyboardInterrupt:
+            console.print("\n[warning]operation cancelled by user[/warning]\n")
+            continue
+        except Exception as e:
+            console.print(f"\n[failure]error: {str(e)}[/failure]")
+            console.print(
+                "[info]if this persists, check your openai api key and try again[/info]\n"
+            )
+            continue
+        finally:
+            stop_loader()
+
+    typer.secho("bubye!", fg=typer.colors.BLUE)
+
+
+if __name__ == "__main__":
+    run()
+
+== asd/core/__init__.py ==
+
+== asd/core/educator.py ==
+import os
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
+
+EDUCATIONAL_NOTE_PROMPT = """You are a git expert. Based on this command result, provide a concise educational note (1-2 sentences) explaining what happened and a key git concept it demonstrates.
+
+Command: {command}
+Success: {success}
+Output: {output}
+Error: {error}
+Original note from plan: {original_note}
+
+Keep it simple and educational."""
+
+
+def get_llm():
+    if os.getenv("GOOGLE_API_KEY"):
+        return ChatGoogleGenerativeAI(
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+            api_key=os.getenv("GOOGLE_API_KEY"),
+        )
+    return ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL", "o4-mini"), api_key=os.getenv("OPENAI_API_KEY")
+    )
+
+
+# using an llm to generate an educational note with structured outputs
+def generate_educational_note(
+    command: str, success: bool, output: str, error: str, original_note: str
+) -> str:
+    llm = get_llm()
+    context = {
+        "command": command,
+        "success": success,
+        "output": output,
+        "error": error,
+        "original_note": original_note,
+    }
+
+    messages = [
+        SystemMessage(content=EDUCATIONAL_NOTE_PROMPT.format(**context)),
+        HumanMessage(content="Generate a concise educational note."),
+    ]
+
+    response = llm.invoke(messages)
+    return response.content.strip()
+
+== asd/core/executor.py ==
+from rich.prompt import Confirm
+
+from ..ui.display import (
+    console,
+    display_recovery_comparison,
+)
+from ..ui.loader import stop_loader
+from ..ui.prompts import confirm_step_execution
+from .git_tools import (
+    check_git_prerequisites,
+    generate_commit_message,
+    get_git_diff_analysis,
+    get_git_status,
+    run_git_command,
+)
+from .models import State, StepResult
+from .planner import generate_recovery_plan
+
+
+# lowercase comments as requested
+def execute_plan(state: State) -> State:
+    stop_loader()
+    state.step_results = []
+    state.lessons_learned = []
+    all_success = True
+
+    for step_index, step in enumerate(state.plan.steps):
+        should_execute, final_command = confirm_step_execution(
+            step, step_index + 1, len(state.plan.steps)
+        )
+
+        if not should_execute:
+            console.print("[warning]> step skipped[/warning]")
+            result = StepResult(
+                command=final_command,
+                success=True,
+                output="step skipped by user",
+                error="",
+                educational_note="skipping steps gives you control over the process",
+                safety_note="you chose to skip this operation",
+            )
+            state.step_results.append(result)
+            continue
+
+        step.command = final_command
+
+        safety_issues = check_git_prerequisites(final_command, state.git_status)
+        if safety_issues:
+            error_msg = f"prerequisite check failed: {'; '.join(safety_issues)}"
+            result = StepResult(
+                command=final_command,
+                success=False,
+                output="",
+                error=error_msg,
+                educational_note="this teaches us to always check git status before running commands",
+                safety_note="checking prerequisites prevents common git mistakes",
+            )
+            state.step_results.append(result)
+            console.print(f"[failure]x step blocked: {error_msg}[/failure]")
+
+            if not Confirm.ask("[prompt]> continue?[/prompt]", console=console):
+                all_success = False
+                break
+            continue
+
+        if final_command.startswith("git commit") and "-m" not in final_command:
+            diff = get_git_diff_analysis()
+            if not diff:
+                console.print("[warning]> nothing staged[/warning]")
+                continue
+
+            commit_msg, explanation = generate_commit_message(diff)
+            final_command = f'git commit -m "{commit_msg}"'
+            console.print(f"[info]> generated: {commit_msg}[/info]")
+
+        console.print(f"[info]> executing: {final_command}[/info]")
+        result = run_git_command(final_command)
+
+        educational_note = step.educational_note
+        safety_note = ""
+
+        if result["success"]:
+            if "commit" in final_command:
+                educational_note += " this creates a permanent snapshot in git history"
+                state.lessons_learned.append(
+                    "commits create permanent snapshots of your staged changes"
+                )
+            elif "push" in final_command:
+                educational_note += (
+                    " this shares your commits with the remote repository"
+                )
+                state.lessons_learned.append(
+                    "pushing makes your commits available to collaborators"
+                )
+        else:
+            console.print(f"[failure]x failed: {result['stderr']}[/failure]")
+            all_success = False
+
+        step_result = StepResult(
+            command=final_command,
+            success=result["success"],
+            output=result["stdout"],
+            error=result["stderr"],
+            educational_note=educational_note,
+            safety_note=safety_note,
+        )
+        state.step_results.append(step_result)
+
+        if not result["success"]:
+            console.print("[loading] analyzing failure...[/loading]")
+            fresh_git_status = get_git_status()
+            completed_successful_steps = [r for r in state.step_results if r.success]
+            recovery_plan = generate_recovery_plan(
+                state, step_result, fresh_git_status, completed_successful_steps
+            )
+
+            display_recovery_comparison(state.plan, recovery_plan, step_result.error)
+            if Confirm.ask("[prompt] proceed with recovery?[/prompt]", console=console):
+                console.print("[info]switching to recovery...[/info]\n")
+                state.plan = recovery_plan
+                state.recovery_needed = True
+                state.lessons_learned.append(
+                    f"learned to recover from: {step_result.error}"
+                )
+                return execute_plan(state)
+            else:
+                console.print("[warning]stopped by user[/warning]")
+                all_success = False
+                break
+
+    state.operation_complete = True
+    state.operation_success = all_success
+    state.final_message = (
+        "execution completed successfully"
+        if all_success
+        else "execution completed with some failures"
+    )
+    return state
+
+== asd/core/git_tools.py ==
+import os
+import subprocess
+from typing import Dict, List, Optional, Tuple
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
+
+from .models import GitStatus, SafetyLevel
+
+
+# running git commands and capturing the output
+# using the subprocess module to run the commands
+def run_git_command(cmd: str, suppress_errors: bool = False) -> Dict[str, any]:
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=os.getcwd(),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return {
+            "success": result.returncode == 0,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+            "returncode": result.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": "command timed out",
+            "returncode": -1,
+        }
+    except Exception as e:
+        if not suppress_errors:
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": str(e),
+                "returncode": -1,
+            }
+        return {"success": False, "stdout": "", "stderr": "", "returncode": -1}
+
+
+# getting the git status of the repo
+def get_git_status() -> GitStatus:
+    # using the run git function and running the git rev-parse --is-inside-work-tree command to check if the current directory is a git repository
+    is_repo_result = run_git_command(
+        "git rev-parse --is-inside-work-tree", suppress_errors=True
+    )
+    # if the current directory is not a git repository, the git status is set to false
+    if not is_repo_result["success"] or is_repo_result["stdout"] != "true":
+        return GitStatus(is_repo=False)
+
+    # run the git branch --show-current command to get the current branch
+    branch_result = run_git_command("git branch --show-current")
+    # if the current branch is not found, the current branch is set to HEAD
+    current_branch = branch_result["stdout"] or "HEAD"
+
+    # run the git status --porcelain command to get the status of the repo
+    porcelain_result = run_git_command("git status --porcelain")
+    # if the git status command fails, the porcelain lines are set to an empty list
+    porcelain_lines = (
+        porcelain_result["stdout"].splitlines() if porcelain_result["success"] else []
+    )
+
+    # parsing the porcelain lines to get the staged, modified, and untracked files
+    staged, modified, untracked = [], [], []
+    for line in porcelain_lines:
+        if len(line) < 3:
+            continue
+        index_status = line[0]
+        worktree_status = line[1]
+        filepath = line[3:].strip()
+
+        if index_status in "AMDRC":
+            staged.append(filepath)
+
+        if worktree_status in "MD":
+            modified.append(filepath)
+        elif index_status == "?" and worktree_status == "?":
+            untracked.append(filepath)
+
+    # run the git status --branch --porcelain command to get the ahead and behind commits
+    ahead = behind = 0
+    # run the git status --branch --porcelain command to get the ahead and behind commits
+    status_result = run_git_command("git status --branch --porcelain")
+    # if the git status command fails, the ahead and behind commits are set to 0
+    if status_result["success"] and status_result["stdout"]:
+        # get the first line of the status result
+        first_line = status_result["stdout"].splitlines()[0]
+        # if the first line contains ahead, try to get the number of ahead commits
+        if "[ahead" in first_line:
+            try:
+                ahead_part = first_line.split("[ahead ")[1].split("]")[0]
+                if "," in ahead_part:
+                    ahead = int(ahead_part.split(",")[0])
+                else:
+                    ahead = int(ahead_part)
+            except (IndexError, ValueError):
+                ahead = 0
+        if "behind" in first_line:
+            try:
+                behind_part = first_line.split("behind ")[1].split("]")[0]
+                if "," in behind_part:
+                    behind = int(behind_part.split(",")[0])
+                else:
+                    behind = int(behind_part)
+            except (IndexError, ValueError):
+                behind = 0
+
+    # run the git ls-files --unmerged command to check for conflicts (for merge conflicts if any)
+    conflicts_result = run_git_command("git ls-files --unmerged")
+    has_conflicts = (
+        bool(conflicts_result["stdout"]) if conflicts_result["success"] else False
+    )
+
+    # run the git rev-list --count HEAD command to get the total number of commits
+    commit_count_result = run_git_command("git rev-list --count HEAD")
+    total_commits = 0
+    # if the git rev-list command fails, the total commits are set to 0
+    if commit_count_result["success"]:
+        try:
+            total_commits = int(commit_count_result["stdout"])
+        except ValueError:
+            total_commits = 0
+
+    # run the git remote command to check if the repo has a remote
+    remote_result = run_git_command("git remote")
+    # if the git remote command fails, the remote is set to false
+    has_remote = bool(remote_result["stdout"]) if remote_result["success"] else False
+    # if the remote is found, the remote name is set to the first remote name
+    remote_name = remote_result["stdout"].split("\n")[0] if has_remote else ""
+
+    last_commit_hash = ""
+    last_commit_message = ""
+    # run the git log -1 --format='%H|%s' command to get the last commit hash and message
+    commit_info_result = run_git_command("git log -1 --format='%H|%s'")
+    if commit_info_result["success"] and commit_info_result["stdout"]:
+        try:
+            # split the commit info result into a list of two elements
+            hash_msg = commit_info_result["stdout"].split("|", 1)
+            # set the last commit hash to the first element of the list
+            last_commit_hash = hash_msg[0][:8]  # short hash
+            # set the last commit message to the second element of the list
+            last_commit_message = hash_msg[1] if len(hash_msg) > 1 else ""
+        except IndexError:
+            pass
+
+    # run the git stash list command to get the number of stashed changes
+    stash_result = run_git_command("git stash list")
+    stash_count = (
+        len(stash_result["stdout"].splitlines()) if stash_result["success"] else 0
+    )
+
+    # get the total number of uncommitted changes
+    uncommitted_changes = len(staged) + len(modified)
+
+    # return the git status with all the information gathered
+    return GitStatus(
+        is_repo=True,
+        current_branch=current_branch,
+        staged=staged,
+        modified=modified,
+        untracked=untracked,
+        ahead=ahead,
+        behind=behind,
+        conflicts=has_conflicts,
+        total_commits=total_commits,
+        uncommitted_changes=uncommitted_changes,
+        has_remote=has_remote,
+        remote_name=remote_name,
+        last_commit_hash=last_commit_hash,
+        last_commit_message=last_commit_message,
+        stash_count=stash_count,
+    )
+
+
+# assessing the safety of an operation
+# using the command and git status to assess the safety of the operation
+# TODO: make this more robust and use the LLM to suggest safer alternatives instead of manually checking for risky commands
+def assess_operation_safety(
+    command: str, git_status: GitStatus
+) -> Tuple[SafetyLevel, List[str]]:
+    warnings = []
+
+    # manually checking for dangerous commands
+    # if any of the dangerous commands are found, the safety level is set to dangerous and a warning is added
+    if any(
+        dangerous in command.lower()
+        for dangerous in [
+            "reset --hard",
+            "clean -fd",
+            "push --force",
+            "push -f",
+            "rebase --onto",
+            "filter-branch",
+        ]
+    ):
+        warnings.append("this operation can permanently delete uncommitted work")
+        warnings.append("consider stashing changes first with 'git stash'")
+        return SafetyLevel.DANGEROUS, warnings
+
+    # manually checking for risky commands
+    # if any of the risky commands are found, the safety level is set to risky and a warning is added
+    if any(
+        risky in command.lower()
+        for risky in [
+            "rebase",
+            "commit --amend",
+            "reset",
+            "push --force-with-lease",
+            "revert",
+            "cherry-pick",
+        ]
+    ):
+        # if the user has unpushed commits, a warning is added
+        if git_status.ahead > 0:
+            warnings.append(
+                "you have unpushed commits - this could affect shared history"
+            )
+        if "rebase" in command.lower() and git_status.has_remote:
+            warnings.append("rebasing shared commits can break collaboration")
+            warnings.append(
+                "consider 'git merge' instead of rebase for shared branches"
+            )
+        return SafetyLevel.RISKY, warnings
+
+    # manually checking for caution commands
+    # if any of the caution commands are found, the safety level is set to caution and a warning is added
+    if any(
+        caution in command.lower()
+        for caution in ["merge", "pull", "push", "stash drop", "branch -d", "tag -d"]
+    ):
+        if "merge" in command.lower() and git_status.uncommitted_changes > 0:
+            warnings.append("you have uncommitted changes - consider committing first")
+        if "pull" in command.lower() and git_status.uncommitted_changes > 0:
+            warnings.append("uncommitted changes might cause merge conflicts")
+        if "push" in command.lower() and git_status.behind > 0:
+            warnings.append("your branch is behind origin - consider pulling first")
+        return SafetyLevel.CAUTION, warnings
+
+    return SafetyLevel.SAFE, warnings
+
+
+# using the git diff --staged command to get the diff of the staged changes
+# if the git diff command fails, the diff is set to None
+def get_git_diff_analysis() -> Optional[str]:
+    diff_result = run_git_command("git diff --staged")
+    if not diff_result["success"] or not diff_result["stdout"]:
+        return None
+    return diff_result["stdout"]
+
+
+# using the git log -count --oneline command to get the recent commit context
+# if the git log command fails, the recent commit context is set to an empty list
+def get_recent_commit_context(count: int = 5) -> List[str]:
+    log_result = run_git_command(f"git log -{count} --oneline")
+    if not log_result["success"]:
+        return []
+    return log_result["stdout"].splitlines()
+
+
+# suggesting safer alternatives to risky commands
+# using the risky command and git status to suggest safer alternatives
+# TODO: make this more robust and use the LLM to suggest safer alternatives instead of manually checking for risky commands
+def suggest_safer_alternatives(risky_command: str, git_status: GitStatus) -> List[str]:
+    alternatives = []
+    cmd_lower = risky_command.lower()
+
+    if "reset --hard" in cmd_lower:
+        alternatives.append("git stash && git reset --hard  # saves your changes first")
+        alternatives.append("git checkout -- <file>  # reset specific files only")
+
+    elif "push --force" in cmd_lower or "push -f" in cmd_lower:
+        alternatives.append("git push --force-with-lease  # safer force push")
+        alternatives.append("git pull --rebase && git push  # sync with remote first")
+
+    elif "rebase" in cmd_lower and git_status.has_remote:
+        alternatives.append("git merge origin/main  # preserves commit history")
+        alternatives.append("git pull origin main  # brings in changes safely")
+
+    elif "commit --amend" in cmd_lower and git_status.ahead > 0:
+        alternatives.append("git commit  # create new commit instead of amending")
+        alternatives.append(
+            "git reset --soft HEAD~1 && git commit  # undo and recommit"
+        )
+
+    return alternatives
+
+
+# the idea is to check the prerequisites for a command
+def check_git_prerequisites(command: str, git_status: GitStatus) -> List[str]:
+    issues = []
+    cmd_lower = command.lower()
+
+    # if the command is a commit and no files are staged, add a warning
+    if "commit" in cmd_lower and not git_status.staged:
+        issues.append("no files are staged for commit - use 'git add' first")
+
+    # if the command is a push and no remote is configured, add a warning
+    if "push" in cmd_lower and not git_status.has_remote:
+        issues.append("no remote repository configured - add one with 'git remote add'")
+
+    # if the command is a merge and there are conflicts, add a warning
+    if "merge" in cmd_lower and git_status.conflicts:
+        issues.append("resolve existing merge conflicts before merging")
+
+    # if the command is a pull and there are uncommitted changes, add a warning
+    if "pull" in cmd_lower and git_status.uncommitted_changes > 0:
+        issues.append("commit or stash changes before pulling to avoid conflicts")
+
+    # if the command is a rebase and there are uncommitted changes, add a warning
+    if "rebase" in cmd_lower and git_status.uncommitted_changes > 0:
+        issues.append("commit or stash changes before rebasing")
+
+    return issues
+
+
+class CommitMessage(BaseModel):
+    message: str = Field(
+        ...,
+        description="ai-generated commit message following conventional commit format",
+    )
+    explanation: str = Field(..., description="why this commit message was chosen")
+
+
+# using llm to generate a commit message
+# using the conventional commit format to generate the commit message
+def generate_commit_message(diff: str) -> Tuple[str, str]:
+    api_key = os.environ["OPENAI_API_KEY"]
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    llm = ChatOpenAI(model=model, api_key=api_key)
+
+    mapper = llm.with_structured_output(CommitMessage)
+
+    system_prompt = """analyze the git diff and create a conventional commit message.
+
+    conventional commit format: <type>: <description>
+
+    types:
+    - feat: new feature
+    - fix: bug fix  
+    - docs: documentation
+    - style: formatting changes
+    - refactor: code restructuring
+    - test: adding tests
+    - chore: maintenance tasks
+
+    examples:
+    - feat: add user authentication
+    - fix: resolve login timeout issue  
+    - docs: update installation guide
+    - refactor: simplify validation logic
+
+    create a concise, imperative message that describes the most significant change."""
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"git diff:\n{diff}"),
+    ]
+
+    result = mapper.invoke(messages)
+    return result.message, result.explanation
+
+== asd/core/graph.py ==
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+
+from ..ui.display import display_execution_plan, display_git_status
+from ..ui.loader import stop_loader
+from .executor import execute_plan
+from .git_tools import get_git_status
+from .intents import parse_intent
+from .models import State
+from .planner import generate_execution_plan
+
+
+def create_git_assistant():
+    graph = StateGraph(State)
+
+    # analyze git context (to understand the current state of the repo)
+    def analyze_git_context(state: State) -> State:
+        git_status = get_git_status()
+        return state.copy(update={"git_status": git_status})
+
+    # parse the user's intent (to understand what they want to do)
+    def parse_git_intent(state: State) -> State:
+        intent = parse_intent(state.input)
+        return state.copy(update={"intent": intent})
+
+    # create an execution plan (to understand the steps needed to achieve the user's intent)
+    def create_execution_plan(state: State) -> State:
+        plan = generate_execution_plan(state)
+        return state.copy(update={"plan": plan})
+
+    # show plan overview before step-by-step execution
+    def show_plan_overview(state: State) -> State:
+        stop_loader()
+        from ..ui.display import console
+
+        console.print()
+        display_git_status(state.git_status)
+        display_execution_plan(state.plan)
+        return state
+
+    graph.add_node("analyze", analyze_git_context)
+    graph.add_node("intent", parse_git_intent)
+    graph.add_node("plan", create_execution_plan)
+    graph.add_node("show", show_plan_overview)
+    graph.add_node("execute", execute_plan)  # step-by-step approval
+
+    # added show node to show the plan overview before step-by-step execution
+    graph.add_edge(START, "analyze")
+    graph.add_edge("analyze", "intent")
+    graph.add_edge("intent", "plan")
+    graph.add_edge("plan", "show")
+    graph.add_edge("show", "execute")  # go directly to execute
+    graph.add_edge("execute", END)  # always end after execute
+
+    return graph.compile(checkpointer=MemorySaver())
+
+== asd/core/intents.py ==
+import os
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
+
+from .models import Intent
+
+SYSTEM_PROMPT = """you are a git safety and education assistant. your job is to understand what the user wants to do with git, 
+while being mindful of safety and learning opportunities.
+
+analyze the user's request and extract:
+
+1. **primary git action** - the main thing they want to accomplish
+2. **secondary actions** - any follow-up git operations needed
+3. **safety concerns** - any fears or safety questions they express
+4. **learning goals** - what they want to understand about git
+5. **specific targets** - files, branches, commits they mention
+6. **force indicators** - if they explicitly want to force something
+
+**common user language patterns:**
+- "undo" → usually means reset or revert
+- "go back" → checkout previous commit or reset
+- "fix my last commit" → amend or reset
+- "clean up" → reset, clean, or branch deletion
+- "sync with main" → pull, merge, or rebase
+- "save my work" → commit, stash, or add
+- "share my changes" → push or create pull request
+- "i messed up" → indicates need for recovery help
+- "without losing work" → safety concern about data loss
+- "what would happen if" → learning/safety question
+
+**examples:**
+user: "undo my last commit but keep my changes"
+→ primary_action: reset, safety_concern: "don't lose changes", learning_goal: "understand difference between reset types"
+
+user: "i accidentally committed to main instead of a feature branch"  
+→ primary_action: reset, secondary_actions: [branch, checkout, commit], safety_concern: "fix wrong branch commit"
+
+user: "safely merge main into my feature branch"
+→ primary_action: merge, safety_concern: "avoid conflicts", learning_goal: "safe merging practices"
+
+focus on git operations only. if the user asks about non-git tasks, set primary_action to "status" and add a note about focusing on git."""
+
+
+# capturing user's intent using an LLM and system prompt with structured outputs
+def get_llm():
+    if os.getenv("GOOGLE_API_KEY"):
+        return ChatGoogleGenerativeAI(
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+            api_key=os.getenv("GOOGLE_API_KEY"),
+        )
+    return ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL", "o4-mini"), api_key=os.getenv("OPENAI_API_KEY")
+    )
+
+
+def parse_intent(user_input: str) -> Intent:
+    llm = get_llm()
+    mapper = llm.with_structured_output(Intent)
+
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=f"user request: {user_input}"),
+    ]
+
+    return mapper.invoke(messages)
+
+== asd/core/models.py ==
+from enum import Enum
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
+
+# added all git actions
+class GitAction(str, Enum):
+    ADD = "add"
+    COMMIT = "commit"
+    PUSH = "push"
+    PULL = "pull"
+    FETCH = "fetch"
+    MERGE = "merge"
+    REBASE = "rebase"
+    RESET = "reset"
+    CHECKOUT = "checkout"
+    BRANCH = "branch"
+    STATUS = "status"
+
+    STASH = "stash"
+    TAG = "tag"
+    CHERRY_PICK = "cherry_pick"
+    REVERT = "revert"
+    SQUASH = "squash"
+    AMEND = "amend"
+    REMOTE_ADD = "remote_add"
+    REMOTE_REMOVE = "remote_remove"
+
+    CLEAN = "clean"
+    PRUNE = "prune"
+    REFLOG = "reflog"
+    LOG = "log"
+    DIFF = "diff"
+    SHOW = "show"
+
+
+class SafetyLevel(str, Enum):
+    SAFE = "safe"  # operations that are easily reversible
+    CAUTION = "caution"  # operations that modify history but are recoverable
+    RISKY = "risky"  # operations that could lose work or affect others
+    DANGEROUS = "dangerous"  # operations that could cause data loss
+
+
+# the intent is a model to store the user's intent
+class Intent(BaseModel):
+    primary_action: GitAction = Field(..., description="main git action to perform")
+    secondary_actions: List[GitAction] = Field(
+        default_factory=list, description="follow-up git actions in order"
+    )
+    safety_concern: Optional[str] = Field(
+        None, description="user's expressed safety concerns or fears"
+    )
+    learning_goal: Optional[str] = Field(
+        None, description="what the user wants to understand about git"
+    )
+    targets: Optional[List[str]] = Field(
+        None, description="files, branches, or commits to operate on"
+    )
+    remote_url: Optional[str] = Field(
+        None, description="repository url for remote operations"
+    )
+    branch_name: Optional[str] = Field(None, description="target branch for operations")
+    commit_message: Optional[str] = Field(
+        None, description="commit message if provided by user"
+    )
+    force_requested: bool = Field(
+        False, description="user explicitly requested force operation"
+    )
+
+
+# a model to store the entire git status of the repo (to give better context to the LLM)
+class GitStatus(BaseModel):
+    is_repo: bool = Field(False, description="inside a git repository")
+    current_branch: str = Field("", description="active branch name")
+    staged: List[str] = Field(default_factory=list, description="staged files")
+    modified: List[str] = Field(default_factory=list, description="modified files")
+    untracked: List[str] = Field(default_factory=list, description="untracked files")
+    ahead: int = Field(0, description="commits ahead of origin")
+    behind: int = Field(0, description="commits behind origin")
+    conflicts: bool = Field(False, description="merge conflicts present")
+
+    # enhanced git context
+    total_commits: int = Field(0, description="total commits in current branch")
+    uncommitted_changes: int = Field(0, description="number of modified + staged files")
+    has_remote: bool = Field(False, description="repository has remote configured")
+    remote_name: str = Field("", description="primary remote name")
+    last_commit_hash: str = Field("", description="hash of most recent commit")
+    last_commit_message: str = Field("", description="message of most recent commit")
+    stash_count: int = Field(0, description="number of stashed changes")
+
+
+# the execution step is a single step in the execution plan
+class ExecutionStep(BaseModel):
+    command: str = Field(..., description="git command to execute")
+    description: str = Field(..., description="what this step does")
+    safety_level: SafetyLevel = Field(
+        ..., description="safety assessment of this operation"
+    )
+    educational_note: str = Field(
+        ..., description="why this step is needed and what it teaches"
+    )
+    potential_issues: List[str] = Field(
+        default_factory=list, description="things that could go wrong"
+    )
+    recovery_options: List[str] = Field(
+        default_factory=list, description="how to undo if something goes wrong"
+    )
+    prerequisites: List[str] = Field(
+        default_factory=list, description="what should be true before running this"
+    )
+
+
+# the safety warning is a list of warnings that are displayed to the user
+class SafetyWarning(BaseModel):
+    level: SafetyLevel = Field(..., description="severity of the warning")
+    message: str = Field(..., description="explanation of the risk")
+    safer_alternatives: List[str] = Field(
+        default_factory=list, description="alternative approaches that are safer"
+    )
+    can_proceed: bool = Field(True, description="whether operation can safely proceed")
+
+
+# the execution plan is a list of steps to execute
+class ExecutionPlan(BaseModel):
+    steps: List[ExecutionStep] = Field(..., description="ordered steps to execute")
+    total_steps: int = Field(..., description="number of steps in plan")
+    overall_safety: SafetyLevel = Field(..., description="safety level of entire plan")
+    summary: str = Field(..., description="high-level explanation of what will happen")
+    educational_summary: str = Field(
+        ..., description="what the user will learn from this"
+    )
+    warnings: List[SafetyWarning] = Field(
+        default_factory=list, description="safety warnings and alternatives"
+    )
+    git_concepts_taught: List[str] = Field(
+        default_factory=list, description="git concepts this plan demonstrates"
+    )
+
+
+# the result of each step in the execution plan
+class StepResult(BaseModel):
+    command: str = Field(..., description="command that was executed")
+    success: bool = Field(..., description="whether command succeeded")
+    output: str = Field("", description="stdout from command")
+    error: str = Field("", description="stderr from command")
+    educational_note: str = Field("", description="what this result teaches")
+    safety_note: str = Field("", description="safety implications of this result")
+
+
+# recovery plan model
+class RecoveryContext(BaseModel):
+    original_intent: Intent = Field(..., description="user's original request")
+    completed_steps: List[StepResult] = Field(
+        default_factory=list, description="steps that completed successfully"
+    )
+    failed_step: StepResult = Field(..., description="the step that failed")
+    current_git_status: GitStatus = Field(
+        ..., description="fresh git status after failure"
+    )
+    failure_type: str = Field(
+        ..., description="category of failure for recovery strategy"
+    )
+    original_plan_summary: str = Field(
+        ..., description="what the original plan was trying to do"
+    )
+
+
+# the state of the graph
+class State(BaseModel):
+    # the user's input
+    input: str = Field(..., description="user's natural language request")
+    # the user's intent is stored in the intent model
+    intent: Optional[Intent] = None
+    # the git status is stored in the git status model
+    git_status: Optional[GitStatus] = None
+    # the execution plan is stored in the execution plan model
+    plan: Optional[ExecutionPlan] = None
+    # the user's approval is stored in the user approval model
+    user_approval: Optional[bool] = None
+    # the step results are stored in the step result model
+    step_results: List[StepResult] = Field(default_factory=list)
+    # the operation complete is stored in the operation complete model
+    operation_complete: bool = False
+    operation_success: bool = False
+    final_message: Optional[str] = None
+    lessons_learned: List[str] = Field(
+        default_factory=list, description="key git concepts the user learned"
+    )
+    # the recovery needed is a boolean that indicates whether the user needs help recovering from an error
+    recovery_needed: bool = Field(
+        False, description="whether user needs help recovering from an error"
+    )
+
+== asd/core/planner.py ==
+import os
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
+
+from .git_tools import get_git_diff_analysis
+from .models import (
+    ExecutionPlan,
+    GitStatus,
+    State,
+    StepResult,
+)
+
+PLANNING_PROMPT = """you are an expert git instructor focused on safety and education. create a step-by-step execution plan that:
+
+1. **prioritizes safety** - warns about risky operations and suggests safer alternatives
+2. **teaches while doing** - explains why each step is needed and what git concepts it demonstrates  
+3. **prevents common mistakes** - checks prerequisites and provides recovery options
+4. **builds understanding** - connects operations to broader git workflows
+
+**input analysis:**
+- user intent: the parsed git action and context
+- current git status: repository state, files, branches, commits
+- safety concerns: user's expressed fears or safety questions
+- previous errors: if a step failed, learn from it
+
+**planning principles:**
+
+**safety first:**
+- always check prerequisites before risky operations
+- suggest safer alternatives for dangerous commands (reset --hard, force push, etc.)
+- warn when operations could affect other developers
+- provide recovery options for each risky step
+
+**educational approach:**
+- explain WHY each step is needed, not just what it does
+- connect steps to git concepts (staging area, working directory, history, etc.)  
+- mention what could go wrong and how to recover
+- teach patterns that apply to future situations
+
+**step structure for each operation:**
+- command: the exact git command
+- description: what this step accomplishes  
+- safety_level: SAFE, CAUTION, RISKY, or DANGEROUS
+- educational_note: why this step works and what it teaches
+- potential_issues: what could go wrong
+- recovery_options: how to undo if needed
+- prerequisites: what must be true before running
+
+**CRITICAL: repository state awareness**
+- if git_status.is_repo is False, DO NOT include "git status" commands
+- when initializing a new repo (is_repo=False), start directly with "git init"
+- only use git commands that work in the current repository state
+
+**planning for non-git directories:**
+- skip git status commands when is_repo=False
+- use "git init" as the first step to create repository
+- then proceed with normal git operations
+
+**common git scenarios to handle safely:**
+
+**when planning commit operations:**
+- if staged_changes are provided, analyze them to create a proper conventional commit message
+- use conventional commit format: feat:, fix:, docs:, refactor:, etc.
+- make the commit message describe what the changes actually do
+- never use generic messages like "save work" or "wip"
+
+example: if staged_changes show new authentication code, use "feat: add user authentication"
+if staged_changes show bug fixes, use "fix: resolve validation errors"
+
+**undoing changes:**
+- "undo last commit" → reset --soft (keeps changes) vs reset --hard (loses changes)
+- "go back to previous version" → checkout vs reset vs revert
+- explain differences between working directory, staging area, and commit history
+
+**syncing with remote:**  
+- "sync with main" → fetch first, then merge vs rebase, explain trade-offs
+- "push my changes" → check if behind remote, warn about force push
+
+**branch management:**
+- "create feature branch" → checkout -b vs branch + checkout, explain branching
+- "merge feature" → fast-forward vs merge commit, explain merge strategies
+
+**commit workflows:**
+- "save my work" → add vs commit vs stash, explain staging concept
+- "fix my commit message" → amend vs new commit, warn about shared history
+
+**example plan for "undo my last commit but keep changes":**
+
+steps:
+1. command: "git reset --soft HEAD~1"
+   description: "move the branch pointer back one commit while preserving your changes"
+   safety_level: "CAUTION"  
+   educational_note: "this demonstrates the difference between reset modes: --soft keeps changes staged, --mixed unstages them, --hard deletes them"
+   recovery_options: ["git reset --hard ORIG_HEAD", "check git reflog for commit hash"]
+
+safety_level: "CAUTION" 
+summary: "safely undo the last commit while keeping all changes staged"
+educational_summary: "you'll learn how git's reset command works and why --soft is safer than --hard"
+git_concepts_taught: ["commit history", "reset modes", "staging area"]
+
+**output the complete ExecutionPlan as json.**"""
+
+
+RECOVERY_PLANNING_PROMPT = """you are an expert git instructor creating a recovery plan after a command failed.
+
+**FAILURE CONTEXT:**
+- original user intent: {original_intent}
+- completed steps successfully: {completed_steps}
+- failed step: {failed_command}
+- failure reason: {error_message}  
+- current git repository state: {current_git_status}
+
+**RECOVERY PLANNING PRINCIPLES:**
+
+**analyze the failure:**
+- why did this specific command fail?
+- what does the error tell us about the repository state?
+- how has the situation changed since the original plan?
+
+**adapt strategy:**
+- the original plan assumed a certain state - what's different now?
+- what's the most direct path to achieve the user's original intent?
+- should we change approach entirely or just fix the immediate issue?
+
+**educational recovery:**
+- explain why this failure happened and how to prevent it
+- teach the user what the error means in git terms
+- show how to recognize and handle this type of failure in the future
+
+**safety in recovery:**
+- ensure the new plan won't cause additional failures
+- check prerequisites before each new step
+- provide recovery options for the new plan too
+
+**example recovery scenarios:**
+
+**scenario 1: commit failed - nothing staged**
+original plan: [add ., commit, push]
+failure: "nothing to commit, working tree clean" 
+analysis: files were already committed, original plan was outdated
+new plan: [status (verify clean), fetch, push] - adapt to reality
+
+**scenario 2: push failed - behind remote**  
+original plan: [commit, push]
+failure: "updates were rejected"
+analysis: someone else pushed, need to sync first
+new plan: [pull --rebase, resolve any conflicts, push] - handle collaboration
+
+**scenario 3: merge failed - conflicts**
+original plan: [checkout main, merge feature]  
+failure: "automatic merge failed, fix conflicts"
+analysis: conflicting changes need manual resolution
+new plan: [show conflicts, guide resolution, add resolved files, commit merge] - step-by-step conflict resolution
+
+**create a new ExecutionPlan that:**
+1. acknowledges what failed and why
+2. adapts to current repository state (not original assumptions)
+3. provides educational context about the failure and recovery
+4. ensures each step has proper prerequisites to avoid cascading failures
+5. teaches patterns for handling similar failures in the future
+
+**output the complete ExecutionPlan as json.**"""
+
+
+# using an llm to generate an execution plan with structured outputs
+def get_llm():
+    if os.getenv("GOOGLE_API_KEY"):
+        return ChatGoogleGenerativeAI(
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+            api_key=os.getenv("GOOGLE_API_KEY"),
+        )
+    return ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL", "o4-mini"), api_key=os.getenv("OPENAI_API_KEY")
+    )
+
+
+def generate_execution_plan(state: State) -> ExecutionPlan:
+    llm = get_llm()
+    planner = llm.with_structured_output(ExecutionPlan)
+
+    # get actual staged diff for intelligent commit message planning
+    staged_diff = get_git_diff_analysis()
+
+    # prepare the context for the llm
+    context = {
+        "user_request": state.input,
+        "intent": state.intent.dict() if state.intent else {},
+        "git_status": state.git_status.dict() if state.git_status else {},
+        "staged_changes": staged_diff if staged_diff else "no staged changes",
+        "previous_failure": None,
+        "learning_opportunity": True,
+    }
+
+    # if the final message contains "failed", add the error message and failed steps to the context
+    # this is for planning steps after execution and getting and error
+    if state.final_message and "failed" in state.final_message:
+        context["previous_failure"] = {
+            "error_message": state.final_message,
+            "failed_steps": [
+                result.dict() for result in state.step_results if not result.success
+            ],
+            "recovery_needed": True,
+        }
+
+    # if the user has a safety concern, add it to the context
+    if state.intent and state.intent.safety_concern:
+        context["safety_focus"] = state.intent.safety_concern
+
+    # if the user has a learning goal, add it to the context
+    if state.intent and state.intent.learning_goal:
+        context["learning_goal"] = state.intent.learning_goal
+
+    # prepare the messages for the llm
+    messages = [
+        SystemMessage(content=PLANNING_PROMPT),
+        HumanMessage(content=f"planning context: {context}"),
+    ]
+
+    plan = planner.invoke(messages)
+    plan.total_steps = len(plan.steps)
+
+    return plan
+
+
+# recovery planning function
+def generate_recovery_plan(
+    state: State,
+    failed_step: StepResult,
+    current_git_status: GitStatus,
+    completed_steps: list,
+) -> ExecutionPlan:
+    llm = get_llm()
+    recovery_planner = llm.with_structured_output(ExecutionPlan)
+
+    # prepare recovery context using the state, failed step, current git status, and completed steps
+    recovery_context = {
+        "original_intent": state.intent.dict() if state.intent else state.input,
+        "completed_steps": [step.dict() for step in completed_steps],
+        "failed_command": failed_step.command,
+        "error_message": failed_step.error,
+        "current_git_status": current_git_status.dict(),
+        "original_plan_summary": state.plan.summary if state.plan else "unknown",
+        "staged_changes": get_git_diff_analysis() or "no staged changes",
+    }
+
+    # prepare messages for recovery planning
+    messages = [
+        SystemMessage(content=RECOVERY_PLANNING_PROMPT.format(**recovery_context)),
+        HumanMessage(
+            content=f"create recovery plan for this failure: {recovery_context}"
+        ),
+    ]
+
+    # generate recovery plan
+    recovery_plan = recovery_planner.invoke(messages)
+    recovery_plan.total_steps = len(recovery_plan.steps)
+
+    return recovery_plan
+
+== asd/core/visualization.py ==
+from pathlib import Path
+
+from .graph import create_git_assistant
+
+graph = create_git_assistant()
+png_bytes = graph.get_graph().draw_mermaid_png()
+
+file_path = Path("images/git_assistant.png")
+file_path.parent.mkdir(parents=True, exist_ok=True)
+
+with open(file_path, "wb") as f:
+    f.write(png_bytes)
+
+print(f"Saved graph image to {file_path}!")
+
+== asd/ui/__init__.py ==
+
+== asd/ui/display.py ==
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.table import Table
+from rich_gradient import Gradient
+
+from .themes import THEME
+
+console = Console(theme=THEME)
+
+# consistent backgrounds
+STATUS_BG = "#0f1419"
+PLAN_BG = "#0b1116"
+RULE_ERR_BG = "#1a1113"
+
+
+def _kv_table(rows: list[tuple[str, str]]) -> Table:
+    t = Table.grid(padding=(0, 2))
+    t.add_column(justify="right", style="caption", no_wrap=True)
+    t.add_column(style="command", overflow="fold")
+    for k, v in rows:
+        t.add_row(k, v)
+    return t
+
+
+def section_rule(title: str, *, variant: str = "normal"):
+    if variant == "error":
+        style = f"failure on {RULE_ERR_BG}"
+    else:
+        style = f"accent on {STATUS_BG}"
+    console.print(Rule(f"[header]{title}[/header]", style=style))
+
+
+def welcome_screen():
+    raw_logo = r"""
+  █████╗ ███████╗██████╗ 
+  ██╔══██╗██╔════╝██╔══██╗
+  ███████║███████╗██║  ██║
+  ██╔══██║╚════██║██║  ██║
+  ██║  ██║███████║██████╔╝
+  ╚═╝  ╚═╝╚══════╝╚═════╝ 
+    """
+    console.clear()
+    logo = raw_logo.strip("\n")
+    gradient_logo = Gradient(logo, colors=["#3b5b76", "#8fb4d8"])
+    console.print(gradient_logo, justify="left")
+
+    console.print("[caption]Tips for getting started:[/caption]")
+    tips = [
+        "press [educational]h[/educational] for help",
+        "press [educational]m[/educational] to select model",
+        "press [educational]q[/educational] to quit",
+    ]
+    for i, t in enumerate(tips, 1):
+        console.print(f"[caption]{i}.[/] {t}")
+    console.print()
+
+
+def display_git_status(status):
+    section_rule("status")
+
+    rows = [
+        ("branch", status.current_branch or "none"),
+        ("staged", str(len(status.staged))),
+        ("modified", str(len(status.modified))),
+        ("untracked", str(len(status.untracked))),
+    ]
+
+    if status.has_remote:
+        sync = (f"↑{status.ahead}" if status.ahead > 0 else "") + (
+            f"↓{status.behind}" if status.behind > 0 else ""
+        )
+        rows.append(("remote", f"{status.remote_name} ({sync or 'synced'})"))
+
+    if status.uncommitted_changes > 0:
+        rows.append(
+            (
+                "note",
+                f"[warning]{status.uncommitted_changes} uncommitted changes[/warning]",
+            )
+        )
+    if status.conflicts:
+        rows.append(("conflicts", "[destructive]detected[/destructive]"))
+
+    console.print(
+        Panel(
+            _kv_table(rows),
+            box=box.MINIMAL,
+            border_style="caption",
+            style=f"on {STATUS_BG}",
+            padding=(0, 1),
+        )
+    )
+    console.print()
+
+
+def display_execution_plan(plan):
+    section_rule("plan")
+
+    lines = [
+        f"[{plan.overall_safety.lower()}]safety: {plan.overall_safety.lower()}[/{plan.overall_safety.lower()}]"
+    ]
+    for i, step in enumerate(plan.steps, 1):
+        icon = {"safe": "+", "caution": "!", "risky": "!", "dangerous": "x"}.get(
+            step.safety_level.lower(), "+"
+        )
+        lines.append(f"[accent]{icon} {i}.[/accent] [command]{step.command}[/]")
+        lines.append(f"  {step.description}")
+        if (
+            step.safety_level.lower() in {"risky", "dangerous"}
+            and step.potential_issues
+        ):
+            lines.append(f"  [warning]! {step.potential_issues[0]}[/warning]")
+
+    if plan.warnings:
+        w = plan.warnings[0]
+        lines.append("[warning]warnings:[/warning]")
+        lines.append(f"[warning]! {w.message}[/warning]")
+        if w.safer_alternatives:
+            lines.append(f"  [info]> {w.safer_alternatives[0]}[/info]")
+
+    lines.append("")
+
+    console.print(
+        Panel(
+            "\n".join(lines),
+            # subtitle=f"[info]{plan.summary}[/info]",
+            box=box.MINIMAL,
+            border_style="accent",
+            style=f"on {PLAN_BG}",
+            padding=(0, 1, 1, 1),
+        )
+    )
+    console.print()
+
+
+def display_recovery_comparison(original_plan, recovery_plan, failure_reason):
+    section_rule("recovery", variant="error")
+    console.print(f"[failure] failure analysis: {failure_reason}[/failure]\n")
+    console.print(f"[warning]original: {original_plan.summary}[/warning]")
+    console.print(f"[success]recovery: {recovery_plan.summary}[/success]\n")
+    console.print(
+        f"[educational] why changed: {recovery_plan.educational_summary}[/educational]\n"
+    )
+    display_execution_plan(recovery_plan)
+
+
+def display_results(state):
+    variant = "error" if not state.operation_success else "normal"
+    section_rule("results", variant=variant)
+
+    if state.operation_success:
+        icon, style = "+", "success"
+    elif state.recovery_needed:
+        icon, style = "!", "warning"
+    else:
+        icon, style = "x", "failure"
+
+    lines = [f"[{style}]{icon} {state.final_message}[/{style}]", ""]
+
+    for result in state.step_results:
+        step_icon = "[success]+[/success]" if result.success else "[failure]x[/failure]"
+        lines.append(f"{step_icon} [command]{result.command}[/]")
+        if result.success and result.output:
+            out = "  " + result.output.replace("\n", "\n  ")
+            lines.append(f"  [info]{out}[/info]")
+            # empty line
+            lines.append("")
+        elif not result.success and result.error:
+            err = "  " + result.error.replace("\n", "\n  ")
+            lines.append(f"  [failure]{err}[/failure]")
+
+    if state.lessons_learned:
+        lines.append("")
+        lines.append("[accent]learned:[/accent]")
+        for lesson in list(set(state.lessons_learned))[:3]:
+            lines.append(f"[note]> {lesson}[/note]")
+            # empty line
+            lines.append("")
+
+    panel_style = f"on {RULE_ERR_BG}" if variant == "error" else f"on {STATUS_BG}"
+    console.print(
+        Panel(
+            "\n".join(lines),
+            box=box.MINIMAL,
+            border_style="caption",
+            style=panel_style,
+            padding=(0, 1),
+        )
+    )
+    console.print()
+    console.print()
+
+
+def show_help():
+    section_rule("help")
+
+    lines = [
+        "[accent]h[/accent]  [info]help[/info]",
+        "[accent]m[/accent]  [info]select model[/info]",
+        "[accent]q[/accent]  [info]quit[/info]",
+        "",
+        "[header]example git tasks:[/header]",
+        "[info]undo my last commit but keep changes[/info]",
+        "[info]safely merge main into my branch[/info]",
+        "[info]clean up my commit history[/info]",
+        "[info]help me resolve merge conflicts[/info]",
+        "[info]push my changes without breaking things[/info]",
+        "[info]what would happen if i reset --hard?[/info]",
+        "",
+        "[caption]asd focuses on git safety and education[/caption]",
+    ]
+
+    console.print(
+        Panel(
+            "\n".join(lines),
+            box=box.MINIMAL,
+            border_style="caption",
+            style=f"on {STATUS_BG}",
+            padding=(1, 1),
+        )
+    )
+    console.print()
+
+== asd/ui/loader.py ==
+from typing import Optional
+
+from rich.align import Align
+from rich.columns import Columns
+from rich.live import Live
+from rich.panel import Panel
+from rich.spinner import Spinner
+
+from .display import console as _loader_console
+
+_current_live: Optional[Live] = None
+
+
+def _render_panel(message: str):
+    row = Columns([Spinner("dots"), Align.left(message)], expand=True, equal=False)
+    return Panel(row, border_style="accent", style="on #0b1116", padding=(0, 1))
+
+
+def start_loader(message: str):
+    global _current_live
+    stop_loader()
+    _current_live = Live(
+        _render_panel(message),
+        console=_loader_console,
+        refresh_per_second=16,
+        transient=True,  # disappears on stop()
+    )
+    _current_live.start()
+
+
+def stop_loader():
+    global _current_live
+    if _current_live is not None:
+        try:
+            _current_live.stop()
+        finally:
+            _current_live = None
+
+== asd/ui/prompts.py ==
+import os
+
+import questionary
+from questionary import Style as QStyle  # custom style for questionary
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+
+from .display import display_execution_plan, display_git_status
+from .themes import SYMBOLS, THEME
+
+console = Console(theme=THEME)
+
+# unified dropdown style to match the ui palette
+# keys are prompt_toolkit style tokens used by questionary
+QSTYLE = QStyle(
+    [
+        ("qmark", "fg:#8fb4d8 bold"),
+        ("question", "fg:#8fb4d8 bold"),
+        ("answer", "fg:#8fb4d8"),
+        ("pointer", "fg:#8fb4d8 bold"),
+        ("highlighted", "fg:#0f1419 bg:#8fb4d8"),
+        ("selected", "fg:#0f1419 bg:#8fb4d8"),
+        ("separator", "fg:#5a6472"),
+        ("instruction", "fg:#5a6472"),
+        ("text", "fg:#e6edf3"),
+        ("disabled", "fg:#5a6472 italic"),
+    ]
+)
+
+
+def configure_api_key() -> bool:
+    if os.getenv("OPENAI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+        return True
+
+    console.print(
+        Panel("[info]no api key found[/info]", title="[header]Setup[/header]", width=40)
+    )
+
+    provider = questionary.select(
+        "Select provider",
+        choices=["OpenAI", "Google"],
+        style=QSTYLE,
+    ).ask()
+    if not provider:
+        console.print("[warning]setup cancelled[/warning]")
+        return False
+
+    key = questionary.password("Enter API key", style=QSTYLE).ask()
+    if not key or not key.strip():
+        console.print("[failure]no key entered[/failure]")
+        return False
+
+    key = key.strip()
+    if provider == "OpenAI":
+        os.environ["OPENAI_API_KEY"] = key
+        os.environ["PROVIDER"] = "openai"
+    else:
+        os.environ["GOOGLE_API_KEY"] = key
+        os.environ["PROVIDER"] = "google"
+
+    console.print(f"[success]api key saved for {provider.lower()}[/success]")
+    return True
+
+
+def get_user_input() -> str:
+    return Prompt.ask(
+        f"[input]{SYMBOLS['prompt']} git task or question?[/input]", console=console
+    ).strip()
+
+
+def confirm_exit() -> bool:
+    return Confirm.ask(
+        f"[prompt]{SYMBOLS['prompt']} quit git assistant?[/prompt]", console=console
+    )
+
+
+def select_model():
+    providers = []
+    if os.getenv("OPENAI_API_KEY"):
+        providers.append(("openai", "OpenAI"))
+    if os.getenv("GOOGLE_API_KEY"):
+        providers.append(("google", "Google"))
+
+    if not providers:
+        console.print(
+            "[failure]no provider configured. set an api key first.[/failure]"
+        )
+        return
+
+    if len(providers) > 1:
+        menu = "\n".join(
+            f"[accent]{i}.[/] {name}" for i, (k, name) in enumerate(providers, 1)
+        )
+        console.print(Panel(menu, title="[header]Select Provider[/header]", width=40))
+        p = Prompt.ask(
+            "Choice",
+            choices=[str(i) for i in range(1, len(providers) + 1)],
+            console=console,
+        )
+        provider = providers[int(p) - 1][0]
+    else:
+        provider = providers[0][0]
+
+    if provider == "openai":
+        models = ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-4.1-mini", "o4-mini"]
+        current = os.getenv("OPENAI_MODEL", "o4-mini")
+    else:
+        models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"]
+        current = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
+
+    display_choices = [
+        f"{m} {'← current' if m == current else ''}".strip() for m in models
+    ]
+
+    selected_display = questionary.select(
+        "Select model",
+        choices=display_choices,
+        default=next(c for c in display_choices if "← current" in c),
+        style=QSTYLE,
+    ).ask()
+
+    sel = selected_display.split(" ")[0]
+    if provider == "openai":
+        os.environ["OPENAI_MODEL"] = sel
+    else:
+        os.environ["GOOGLE_MODEL"] = sel
+
+    console.print(f"» model set to {sel}\n")
+
+
+def modify_command(current_command: str) -> str:
+    console.print(f"[info]current: {current_command}[/info]")
+    new_command = Prompt.ask(
+        f"[prompt]{SYMBOLS['prompt']} enter new command[/prompt]",
+        console=console,
+        default=current_command,
+    )
+    return new_command.strip()
+
+
+def confirm_step_execution(
+    step, step_number: int, total_steps: int
+) -> tuple[bool, str]:
+    console.print(f"\n[accent]step {step_number}/{total_steps}[/accent]")
+    console.print(f"[command]{step.command}[/]")
+    console.print(f"[info]{step.description}[/info]")
+
+    if step.safety_level.lower() in ["risky", "dangerous"]:
+        console.print(
+            f"[{step.safety_level.lower()}]! {step.safety_level.lower()} operation[/{step.safety_level.lower()}]"
+        )
+
+    while True:
+        choice = Prompt.ask(
+            f"[prompt]{SYMBOLS['prompt']} execute this command?[/prompt] [choice][y/n/modify][/choice]",
+            choices=["y", "n", "modify"],
+            console=console,
+            default="y",
+            show_choices=True,
+            show_default=False,
+        ).lower()
+
+        if choice in ["y", "yes"]:
+            return True, step.command
+        elif choice in ["n", "no"]:
+            return False, step.command
+        elif choice in ["modify", "m"]:
+            new_command = modify_command(step.command)
+            console.print(f"[success]+ updated to: {new_command}[/success]")
+            return True, new_command
+
+
+def confirm_plan(state) -> bool:
+    console.print()
+    display_git_status(state.git_status)
+    display_execution_plan(state.plan)
+    lvl = state.plan.overall_safety.lower()
+
+    if lvl == "dangerous":
+        msg = f"[failure]{SYMBOLS['prompt']} this operation is dangerous! proceed anyway?[/failure]"
+    elif lvl == "risky":
+        msg = f"[destructive]{SYMBOLS['prompt']} this operation is risky. continue?[/destructive]"
+    elif lvl == "caution":
+        msg = f"[warning]{SYMBOLS['prompt']} proceed with caution?[/warning]"
+    else:
+        msg = f"[prompt]{SYMBOLS['prompt']} execute this plan?[/prompt]"
+
+    if lvl in ["dangerous", "risky"] and state.plan.warnings:
+        console.print()
+        console.print(
+            "[warning]> tip: you can type 'n' to see safer alternatives[/warning]"
+        )
+
+    return Confirm.ask(msg, console=console)
+
+== asd/ui/themes.py ==
+from rich.theme import Theme
+
+THEME = Theme(
+    {
+        # primary hierarchy (titles, prompts, input labels)
+        "header": "bold #3b5b76",  # deep slate blue
+        "prompt": "bold #3b5b76",
+        "input": "bold #3b5b76",
+        # accents & content roles
+        "accent": "#8fb4d8",  # soft steel blue highlight
+        "command": "#e6edf3",  # high-contrast neutral for commands/output
+        "info": "#a9b7c6",  # secondary copy
+        "caption": "#5a6472",  # low-emphasis labels
+        # feedback (kept muted; no neon)
+        "success": "#8fb4d8",  # reuse accent for success
+        "warning": "#b7c1cf",  # cool grey-blue caution
+        "failure": "#d16d6d",  # tempered red
+        "destructive": "#d16d6d",
+        "loading": "#8fb4d8",
+        # safety levels
+        "safe": "#8fb4d8",
+        "caution": "#b7c1cf",
+        "risky": "#d29b6d",
+        "dangerous": "#d16d6d",
+        # educational cues stay cool
+        "educational": "#8fb4d8",
+        "concept": "#3b5b76",
+        # questionary
+        "choice": "#d7ba7d",
+        "note": "#ff77ff",
+    }
+)
+
+# simple symbols used across the ui
+SYMBOLS = {
+    "prompt": ">",
+    "success": "+",
+    "failure": "x",
+    "warning": "!",
+    "info": "*",
+    "safety": "#",
+    "education": ">",
+}
+

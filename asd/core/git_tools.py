@@ -3,9 +3,11 @@ import subprocess
 from typing import Dict, List, Optional, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
+from .costs import UsageCallback, get_active_model_provider
 from .models import GitStatus, SafetyLevel
 
 
@@ -181,73 +183,6 @@ def get_git_status() -> GitStatus:
     )
 
 
-# assessing the safety of an operation
-# using the command and git status to assess the safety of the operation
-# TODO: make this more robust and use the LLM to suggest safer alternatives instead of manually checking for risky commands
-def assess_operation_safety(
-    command: str, git_status: GitStatus
-) -> Tuple[SafetyLevel, List[str]]:
-    warnings = []
-
-    # manually checking for dangerous commands
-    # if any of the dangerous commands are found, the safety level is set to dangerous and a warning is added
-    if any(
-        dangerous in command.lower()
-        for dangerous in [
-            "reset --hard",
-            "clean -fd",
-            "push --force",
-            "push -f",
-            "rebase --onto",
-            "filter-branch",
-        ]
-    ):
-        warnings.append("this operation can permanently delete uncommitted work")
-        warnings.append("consider stashing changes first with 'git stash'")
-        return SafetyLevel.DANGEROUS, warnings
-
-    # manually checking for risky commands
-    # if any of the risky commands are found, the safety level is set to risky and a warning is added
-    if any(
-        risky in command.lower()
-        for risky in [
-            "rebase",
-            "commit --amend",
-            "reset",
-            "push --force-with-lease",
-            "revert",
-            "cherry-pick",
-        ]
-    ):
-        # if the user has unpushed commits, a warning is added
-        if git_status.ahead > 0:
-            warnings.append(
-                "you have unpushed commits - this could affect shared history"
-            )
-        if "rebase" in command.lower() and git_status.has_remote:
-            warnings.append("rebasing shared commits can break collaboration")
-            warnings.append(
-                "consider 'git merge' instead of rebase for shared branches"
-            )
-        return SafetyLevel.RISKY, warnings
-
-    # manually checking for caution commands
-    # if any of the caution commands are found, the safety level is set to caution and a warning is added
-    if any(
-        caution in command.lower()
-        for caution in ["merge", "pull", "push", "stash drop", "branch -d", "tag -d"]
-    ):
-        if "merge" in command.lower() and git_status.uncommitted_changes > 0:
-            warnings.append("you have uncommitted changes - consider committing first")
-        if "pull" in command.lower() and git_status.uncommitted_changes > 0:
-            warnings.append("uncommitted changes might cause merge conflicts")
-        if "push" in command.lower() and git_status.behind > 0:
-            warnings.append("your branch is behind origin - consider pulling first")
-        return SafetyLevel.CAUTION, warnings
-
-    return SafetyLevel.SAFE, warnings
-
-
 # using the git diff --staged command to get the diff of the staged changes
 # if the git diff command fails, the diff is set to None
 def get_git_diff_analysis() -> Optional[str]:
@@ -255,43 +190,6 @@ def get_git_diff_analysis() -> Optional[str]:
     if not diff_result["success"] or not diff_result["stdout"]:
         return None
     return diff_result["stdout"]
-
-
-# using the git log -count --oneline command to get the recent commit context
-# if the git log command fails, the recent commit context is set to an empty list
-def get_recent_commit_context(count: int = 5) -> List[str]:
-    log_result = run_git_command(f"git log -{count} --oneline")
-    if not log_result["success"]:
-        return []
-    return log_result["stdout"].splitlines()
-
-
-# suggesting safer alternatives to risky commands
-# using the risky command and git status to suggest safer alternatives
-# TODO: make this more robust and use the LLM to suggest safer alternatives instead of manually checking for risky commands
-def suggest_safer_alternatives(risky_command: str, git_status: GitStatus) -> List[str]:
-    alternatives = []
-    cmd_lower = risky_command.lower()
-
-    if "reset --hard" in cmd_lower:
-        alternatives.append("git stash && git reset --hard  # saves your changes first")
-        alternatives.append("git checkout -- <file>  # reset specific files only")
-
-    elif "push --force" in cmd_lower or "push -f" in cmd_lower:
-        alternatives.append("git push --force-with-lease  # safer force push")
-        alternatives.append("git pull --rebase && git push  # sync with remote first")
-
-    elif "rebase" in cmd_lower and git_status.has_remote:
-        alternatives.append("git merge origin/main  # preserves commit history")
-        alternatives.append("git pull origin main  # brings in changes safely")
-
-    elif "commit --amend" in cmd_lower and git_status.ahead > 0:
-        alternatives.append("git commit  # create new commit instead of amending")
-        alternatives.append(
-            "git reset --soft HEAD~1 && git commit  # undo and recommit"
-        )
-
-    return alternatives
 
 
 # the idea is to check the prerequisites for a command
@@ -332,10 +230,20 @@ class CommitMessage(BaseModel):
 
 # using llm to generate a commit message
 # using the conventional commit format to generate the commit message
+# FIXED: the model now uses the same model as the rest of the application
+def get_llm():
+    if os.getenv("GOOGLE_API_KEY"):
+        return ChatGoogleGenerativeAI(
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+            api_key=os.getenv("GOOGLE_API_KEY"),
+        )
+    return ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL", "o4-mini"), api_key=os.getenv("OPENAI_API_KEY")
+    )
+
+
 def generate_commit_message(diff: str) -> Tuple[str, str]:
-    api_key = os.environ["OPENAI_API_KEY"]
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    llm = ChatOpenAI(model=model, api_key=api_key)
+    llm = get_llm()
 
     mapper = llm.with_structured_output(CommitMessage)
 
@@ -365,5 +273,9 @@ def generate_commit_message(diff: str) -> Tuple[str, str]:
         HumanMessage(content=f"git diff:\n{diff}"),
     ]
 
-    result = mapper.invoke(messages)
+    provider, model = get_active_model_provider()
+    result = mapper.invoke(
+        messages,
+        config={"callbacks": [UsageCallback(provider, model)]},
+    )
     return result.message, result.explanation

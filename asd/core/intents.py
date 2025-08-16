@@ -4,6 +4,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
+from .costs import UsageCallback, get_active_model_provider
 from .models import Intent
 
 SYSTEM_PROMPT = """you are a git safety and education assistant. your job is to understand what the user wants to do with git, 
@@ -64,4 +65,8 @@ def parse_intent(user_input: str) -> Intent:
         HumanMessage(content=f"user request: {user_input}"),
     ]
 
-    return mapper.invoke(messages)
+    provider, model = get_active_model_provider()
+    return mapper.invoke(
+        messages,
+        config={"callbacks": [UsageCallback(provider, model)]},
+    )

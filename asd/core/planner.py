@@ -4,6 +4,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
+from .costs import UsageCallback, get_active_model_provider
+
 from .git_tools import get_git_diff_analysis
 from .models import (
     ExecutionPlan,
@@ -218,9 +220,12 @@ def generate_execution_plan(state: State) -> ExecutionPlan:
         HumanMessage(content=f"planning context: {context}"),
     ]
 
-    plan = planner.invoke(messages)
+    provider, model = get_active_model_provider()
+    plan = planner.invoke(
+        messages,
+        config={"callbacks": [UsageCallback(provider, model)]},
+    )
     plan.total_steps = len(plan.steps)
-
     return plan
 
 
@@ -254,7 +259,10 @@ def generate_recovery_plan(
     ]
 
     # generate recovery plan
-    recovery_plan = recovery_planner.invoke(messages)
+    provider, model = get_active_model_provider()
+    recovery_plan = recovery_planner.invoke(
+        messages,
+        config={"callbacks": [UsageCallback(provider, model)]},
+    )
     recovery_plan.total_steps = len(recovery_plan.steps)
-
     return recovery_plan

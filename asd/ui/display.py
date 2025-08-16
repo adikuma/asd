@@ -5,6 +5,7 @@ from rich.rule import Rule
 from rich.table import Table
 from rich_gradient import Gradient
 
+from ..core.costs import fmt_usd, session_usage_snapshot
 from .themes import THEME
 
 console = Console(theme=THEME)
@@ -51,6 +52,7 @@ def welcome_screen():
         "press [educational]h[/educational] for help",
         "press [educational]m[/educational] to select model",
         "press [educational]q[/educational] to quit",
+        "press [educational]n[/educational] to toggle nerd stats",
     ]
     for i, t in enumerate(tips, 1):
         console.print(f"[caption]{i}.[/] {t}")
@@ -199,6 +201,7 @@ def show_help():
     lines = [
         "[accent]h[/accent]  [info]help[/info]",
         "[accent]m[/accent]  [info]select model[/info]",
+        "[accent]n[/accent]  [info]nerd stats (toggle)[/info]",
         "[accent]q[/accent]  [info]quit[/info]",
         "",
         "[header]example git tasks:[/header]",
@@ -221,4 +224,48 @@ def show_help():
             padding=(1, 1),
         )
     )
+    console.print()
+
+
+def display_nerd_stats():
+    snap = session_usage_snapshot()
+    grand = snap.get("grand", {})
+    models = snap.get("models", [])
+
+    section_rule("nerd stats")
+
+    if not grand or int(grand.get("calls", 0)) == 0:
+        console.print("[caption]no llm usage yet[/caption]\n")
+        return
+
+    # clean minimal table
+    tbl = Table(show_header=False, box=None, padding=(0, 2))
+    tbl.add_column(style="command")
+    tbl.add_column(justify="right", style="info")
+    tbl.add_column(justify="right", style="accent")
+
+    # add model rows
+    for r in sorted(models, key=lambda x: float(x.get("cost", 0.0)), reverse=True):
+        model = f"{r.get('provider', '-')}:{r.get('model', '-')}"
+        tokens = (
+            f"{int(r.get('prompt_tokens', 0)) + int(r.get('completion_tokens', 0)):,}"
+        )
+        cost = fmt_usd(float(r.get("cost", 0.0)))
+        tbl.add_row(model, tokens, cost)
+
+    # add total if multiple models
+    if len(models) > 1:
+        tbl.add_row("", "", "")  # spacer
+        total_tokens = int(grand.get("prompt_tokens", 0)) + int(
+            grand.get("completion_tokens", 0)
+        )
+        total_cost = fmt_usd(float(grand.get("cost", 0.0)))
+        total_calls = int(grand.get("calls", 0))
+        tbl.add_row(
+            f"[caption]total ({total_calls:,})[/caption]",
+            f"[caption]{total_tokens:,}[/caption]",
+            f"[accent]{total_cost}[/accent]",
+        )
+
+    console.print(tbl)
     console.print()

@@ -148,24 +148,6 @@ class StepResult(BaseModel):
     safety_note: str = Field("", description="safety implications of this result")
 
 
-# recovery plan model
-class RecoveryContext(BaseModel):
-    original_intent: Intent = Field(..., description="user's original request")
-    completed_steps: List[StepResult] = Field(
-        default_factory=list, description="steps that completed successfully"
-    )
-    failed_step: StepResult = Field(..., description="the step that failed")
-    current_git_status: GitStatus = Field(
-        ..., description="fresh git status after failure"
-    )
-    failure_type: str = Field(
-        ..., description="category of failure for recovery strategy"
-    )
-    original_plan_summary: str = Field(
-        ..., description="what the original plan was trying to do"
-    )
-
-
 # the state of the graph
 class State(BaseModel):
     # the user's input

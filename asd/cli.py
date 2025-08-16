@@ -6,7 +6,12 @@ from rich.console import Console
 
 from .core.graph import create_git_assistant
 from .core.models import State
-from .ui.display import display_results, show_help, welcome_screen
+from .ui.display import (
+    display_nerd_stats,
+    display_results,
+    show_help,
+    welcome_screen,
+)
 from .ui.loader import start_loader, stop_loader
 from .ui.prompts import (
     configure_api_key,
@@ -36,6 +41,7 @@ def run():
 
     assistant = create_git_assistant()
     thread_id = "git_session"
+    nerd_stats_enabled = False
 
     while True:
         user_input = get_user_input()
@@ -53,6 +59,13 @@ def run():
             select_model()
             continue
 
+        # toggle nerd stats (session totals table)
+        if user_input.lower() in ("n", "nerd", "stats", "usage"):
+            nerd_stats_enabled = not nerd_stats_enabled
+            state = "on" if nerd_stats_enabled else "off"
+            console.print(f"[info]nerd stats {state}[/info]\n")
+            continue
+
         if not user_input.strip():
             continue
 
@@ -68,6 +81,9 @@ def run():
 
             console.print()
             display_results(final_state)  # prints two trailing newlines by design
+
+            if nerd_stats_enabled:
+                display_nerd_stats()
 
         except KeyboardInterrupt:
             console.print("\n[warning]operation cancelled by user[/warning]\n")

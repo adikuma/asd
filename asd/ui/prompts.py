@@ -6,7 +6,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
-from .display import display_execution_plan, display_git_status
 from .themes import SYMBOLS, THEME
 
 console = Console(theme=THEME)
@@ -169,27 +168,3 @@ def confirm_step_execution(
             new_command = modify_command(step.command)
             console.print(f"[success]+ updated to: {new_command}[/success]")
             return True, new_command
-
-
-def confirm_plan(state) -> bool:
-    console.print()
-    display_git_status(state.git_status)
-    display_execution_plan(state.plan)
-    lvl = state.plan.overall_safety.lower()
-
-    if lvl == "dangerous":
-        msg = f"[failure]{SYMBOLS['prompt']} this operation is dangerous! proceed anyway?[/failure]"
-    elif lvl == "risky":
-        msg = f"[destructive]{SYMBOLS['prompt']} this operation is risky. continue?[/destructive]"
-    elif lvl == "caution":
-        msg = f"[warning]{SYMBOLS['prompt']} proceed with caution?[/warning]"
-    else:
-        msg = f"[prompt]{SYMBOLS['prompt']} execute this plan?[/prompt]"
-
-    if lvl in ["dangerous", "risky"] and state.plan.warnings:
-        console.print()
-        console.print(
-            "[warning]> tip: you can type 'n' to see safer alternatives[/warning]"
-        )
-
-    return Confirm.ask(msg, console=console)

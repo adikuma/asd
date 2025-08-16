@@ -65,3 +65,16 @@ flowchart LR
 ASD is an early project **with plenty of room for improvement**. I would love to have people test it, report issues, and suggest features so I can refine and expand its capabilities.
 
 Contributions and feedback are welcome. Please open an issue or submit a pull request.
+
+## Contribution Guidelines
+
+This is my general contribution process; I like to keep it simple—sorry about that :)
+
+| Topic                   | Guidelines                                                                                                                      |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Branching Strategy      | `feature/` for new features (e.g., `feature/add-login-command`), `fix/` for bug fixes (e.g., `fix/handle-empty-input`). |
+| Code Formatting         | Use [ruff] for formatting. Run `ruff format .` before pushing.                                                                |
+| Code Style              | Keep comments lowercase; use `# NOTE:` or `# TODO:` for import-related comments.                                            |
+| Commit Messages         | Follow[Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) specification.                                        |
+| Pull Requests & Merging | Create a PR; merging to `main` requires ≥1 collaborator approval; use **squash merge**.                                |
+| Creativity              | Feel free to experiment and innovate.                                                                                           |
