@@ -2,6 +2,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from ..ui.display import display_execution_plan, display_git_status
+from ..ui.loader import stop_loader
 from .executor import execute_plan
 from .git_tools import get_git_status
 from .intents import parse_intent
@@ -29,6 +30,7 @@ def create_git_assistant():
 
     # show plan overview before step-by-step execution
     def show_plan_overview(state: State) -> State:
+        stop_loader()
         from ..ui.display import console
 
         console.print()
